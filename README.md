@@ -22,8 +22,8 @@ Plugin & Script tự động nhận diện chữ Tiếng Việt có dấu (**Cro
 
 ## 📖 Hướng dẫn sử dụng
 
-1. **Chọn Layer cần tách**:
-   - Click chọn Layer PNG trên Timeline hoặc trong Project Panel của After Effects, sau đó bấm **`🔄 Lấy Layer đang chọn`** (hoặc chọn nhanh file PNG từ thanh Dropdown ngay trên đầu cửa sổ).
+1. **Chọn Layer cần tách (Hỗ trợ cả `.png` và Layer trong file `.psd`)**:
+   - Click chọn Layer `.png` hoặc Layer thuộc file Photoshop `.psd` (ví dụ `COPY/file.psd` được import dạng *Composition - Retain Layer Sizes* hoặc *Document Size*) trên Timeline / Project Panel của After Effects, sau đó bấm **`🔄 Lấy Layer đang chọn`**.
 2. **Chia cụm nhanh (1-Click Presets)**:
    - **`📑 Gộp theo Dòng`**: Tự động gom các chữ cùng hàng ngang thành từng Layer dòng.
    - **`🔤 Tách từng Từ`**: Mỗi từ / icon thành 1 Layer riêng.

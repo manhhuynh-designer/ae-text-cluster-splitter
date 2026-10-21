@@ -175,7 +175,7 @@ def get_active_ae_layer_info() -> dict:
         function isImageFile(fileObj) {{
             if (!fileObj) return false;
             var nm = fileObj.name.toLowerCase();
-            return (nm.indexOf(".png") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1);
+            return (nm.indexOf(".png") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1 || nm.indexOf(".psd") !== -1);
         }}
         function isImageLayer(l) {{
             return (l && l.source && l.source.file && isImageFile(l.source.file));
@@ -187,6 +187,7 @@ def get_active_ae_layer_info() -> dict:
         var comp = null;
         var targetLayer = null;
         var directFile = null;
+        var directItem = null;
         var act = app.project.activeItem;
 
         if (act && (act instanceof CompItem)) {{
@@ -211,13 +212,37 @@ def get_active_ae_layer_info() -> dict:
                     }}
                 }}
             }}
+            if (!targetLayer) {{
+                for (var i = 1; i <= comp.numLayers; i++) {{
+                    var l = comp.layer(i);
+                    if (isImageLayer(l) && !isSplitLayer(l)) {{
+                        targetLayer = l;
+                        break;
+                    }}
+                }}
+            }}
+            if (!targetLayer) {{
+                for (var i2 = 1; i2 <= comp.numLayers; i2++) {{
+                    var l2 = comp.layer(i2);
+                    if (isImageLayer(l2)) {{
+                        targetLayer = l2;
+                        break;
+                    }}
+                }}
+            }}
         }}
 
-        if (!targetLayer && app.project.selection && app.project.selection.length > 0) {{
+        if (!targetLayer && act && (act instanceof FootageItem) && act.file && isImageFile(act.file)) {{
+            directFile = act.file.fsName.replace(/\\\\/g, "/");
+            directItem = act;
+        }}
+
+        if (!targetLayer && !directFile && app.project.selection && app.project.selection.length > 0) {{
             for (var p = 0; p < app.project.selection.length; p++) {{
                 var selItem = app.project.selection[p];
                 if (selItem instanceof FootageItem && selItem.file && isImageFile(selItem.file)) {{
                     directFile = selItem.file.fsName.replace(/\\\\/g, "/");
+                    directItem = selItem;
                     break;
                 }}
                 if (selItem instanceof CompItem) {{
@@ -234,46 +259,27 @@ def get_active_ae_layer_info() -> dict:
             }}
         }}
 
-        if (!targetLayer && !directFile && act && (act instanceof FootageItem) && act.file && isImageFile(act.file)) {{
-            directFile = act.file.fsName.replace(/\\\\/g, "/");
-        }}
-
-        if (!targetLayer && !directFile && comp) {{
-            for (var i = 1; i <= comp.numLayers; i++) {{
-                var l = comp.layer(i);
-                if (isImageLayer(l) && !isSplitLayer(l)) {{
-                    targetLayer = l;
-                    break;
-                }}
-            }}
-            if (!targetLayer) {{
-                for (var i2 = 1; i2 <= comp.numLayers; i2++) {{
-                    var l2 = comp.layer(i2);
-                    if (isImageLayer(l2)) {{
-                        targetLayer = l2;
-                        break;
-                    }}
-                }}
-            }}
-        }}
-
         if (targetLayer) {{
             var filePath = targetLayer.source.file.fsName.replace(/\\\\/g, "/");
             var compName = comp ? comp.name.replace(/"/g, '\\\\"') : "";
             var layerName = targetLayer.name.replace(/"/g, '\\\\"');
-            f.write('{{"ok": true, "compName": "' + compName + '", "layerName": "' + layerName + '", "layerIndex": ' + targetLayer.index + ', "filePath": "' + filePath + '"}}');
+            var srcName = (targetLayer.source && targetLayer.source.name) ? targetLayer.source.name.replace(/"/g, '\\\\"') : "";
+            f.write('{{"ok": true, "compName": "' + compName + '", "layerName": "' + layerName + '", "sourceName": "' + srcName + '", "layerWidth": ' + targetLayer.width + ', "layerHeight": ' + targetLayer.height + ', "layerIndex": ' + targetLayer.index + ', "filePath": "' + filePath + '"}}');
             f.close();
             return;
         }}
 
         if (directFile) {{
             var cName = comp ? comp.name.replace(/"/g, '\\\\"') : "Project Panel";
-            f.write('{{"ok": true, "compName": "' + cName + '", "layerName": "Project Footage", "layerIndex": 0, "filePath": "' + directFile + '"}}');
+            var dSrcName = (directItem && directItem.name) ? directItem.name.replace(/"/g, '\\\\"') : "";
+            var dw = directItem ? directItem.width : 0;
+            var dh = directItem ? directItem.height : 0;
+            f.write('{{"ok": true, "compName": "' + cName + '", "layerName": "' + dSrcName + '", "sourceName": "' + dSrcName + '", "layerWidth": ' + dw + ', "layerHeight": ' + dh + ', "layerIndex": 0, "filePath": "' + directFile + '"}}');
             f.close();
             return;
         }}
 
-        f.write('{{"ok": false, "error": "Hãy click chọn 1 Layer PNG trên Timeline hoặc trong Project Panel!"}}');
+        f.write('{{"ok": false, "error": "Hãy click chọn 1 Layer PNG/PSD trên Timeline hoặc trong Project Panel!"}}');
         f.close();
     }})();
     """
@@ -313,6 +319,7 @@ VN_WORD_FIXES = {
     "VỚ": "VỚI", "GIẶI": "GIẶT", "NHẠNH": "NHANH",
     "AO": "ÁO", "ĐE": "ĐỂ", "ĐỀ": "ĐỂ", "CO": "CÓ",
     "PHỐT": "PHÚT", "PHOT": "PHÚT", "CUNG": "CÙNG",
+    "ĐÀI": "DÀI",
 }
 
 VIETOCR_VOCAB_CHARS = (
@@ -464,9 +471,100 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
     return out_tokens
 
 
+def extract_psd_layer_bgra(file_path: str, layer_name: str = "", source_name: str = "",
+                           layer_w: int = 0, layer_h: int = 0) -> tuple:
+    """Extracts the target RGBA sub-layer from a .psd file using psd-tools and returns (img_bgra, preview_b64, matched_src_name)."""
+    try:
+        from psd_tools import PSDImage
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "psd-tools"], capture_output=True, timeout=60)
+        from psd_tools import PSDImage
+    from PIL import Image
+
+    psd = PSDImage.open(file_path)
+    sub_name = ""
+    if source_name and "/" in source_name:
+        sub_name = unicodedata.normalize("NFC", source_name.split("/")[0].strip())
+    elif layer_name:
+        sub_name = unicodedata.normalize("NFC", layer_name.strip())
+
+    target = None
+    all_layers = list(psd.descendants())
+
+    # 1. Exact name + exact AE layer dimensions match (Retain Layer Sizes)
+    if sub_name and layer_w > 0 and layer_h > 0:
+        for lyr in all_layers:
+            l_nm = unicodedata.normalize("NFC", (lyr.name or "").strip())
+            if l_nm == sub_name and lyr.size == (layer_w, layer_h) and not lyr.is_group():
+                target = lyr
+                break
+        if target is None:
+            for lyr in all_layers:
+                l_nm = unicodedata.normalize("NFC", (lyr.name or "").strip())
+                if l_nm == sub_name and lyr.size == (layer_w, layer_h):
+                    target = lyr
+                    break
+
+    # 2. Exact AE layer dimensions match if layer was renamed in AE timeline
+    if target is None and layer_w > 0 and layer_h > 0 and (layer_w, layer_h) != psd.size:
+        for lyr in all_layers:
+            if lyr.size == (layer_w, layer_h) and not lyr.is_group():
+                target = lyr
+                break
+        if target is None:
+            for lyr in all_layers:
+                if lyr.size == (layer_w, layer_h):
+                    target = lyr
+                    break
+
+    # 3. Name match (e.g. imported as Document Size or selected from Project Panel)
+    if target is None and sub_name:
+        for lyr in all_layers:
+            l_nm = unicodedata.normalize("NFC", (lyr.name or "").strip())
+            if l_nm == sub_name and not lyr.is_group() and lyr.size[0] > 0 and lyr.size[1] > 0:
+                target = lyr
+                break
+        if target is None:
+            for lyr in all_layers:
+                l_nm = unicodedata.normalize("NFC", (lyr.name or "").strip())
+                if l_nm == sub_name and lyr.size[0] > 0 and lyr.size[1] > 0:
+                    target = lyr
+                    break
+
+    # 4. Fallback when opening a .psd directly without layer context: pick "COPY" / "TEXT" layer
+    if target is None:
+        for lyr in all_layers:
+            l_nm = unicodedata.normalize("NFC", (lyr.name or "").strip()).upper()
+            if l_nm in ("COPY", "TEXT", "HEADLINE", "TITLE") and not lyr.is_group() and lyr.size[0] > 80:
+                target = lyr
+                break
+
+    if target is not None:
+        pil_img = (target.topil() if not target.is_group() else target.composite()).convert("RGBA")
+        # If AE layer has full PSD document dimensions (imported as Composition without Retain Layer Sizes), place at layer offset
+        if layer_w == psd.width and layer_h == psd.height and pil_img.size != psd.size:
+            canvas = Image.new("RGBA", psd.size, (0, 0, 0, 0))
+            canvas.paste(pil_img, (int(target.left), int(target.top)), pil_img)
+            pil_img = canvas
+        matched_src = source_name or f"{target.name}/{os.path.basename(file_path)}"
+    else:
+        pil_img = psd.composite().convert("RGBA")
+        matched_src = source_name or os.path.basename(file_path)
+
+    rgba_arr = np.asarray(pil_img)
+    img_bgra = cv2.cvtColor(rgba_arr, cv2.COLOR_RGBA2BGRA)
+    ok_enc, png_buf = cv2.imencode(".png", img_bgra)
+    b64_str = "data:image/png;base64," + base64.b64encode(png_buf.tobytes()).decode("ascii") if ok_enc else ""
+    return img_bgra, b64_str, matched_src
+
+
 class ImageClusterState:
     def __init__(self):
         self.file_path = None
+        self.layer_name = ""
+        self.source_name = ""
+        self.layer_w = 0
+        self.layer_h = 0
         self.img_bgra = None
         self.h = 0
         self.w = 0
@@ -483,26 +581,48 @@ class ImageClusterState:
         self.preview_counter = 0
         self.preview_png_path = str(Path(tempfile.gettempdir()) / "ae_splitter_ui_preview_0.png")
 
-    def load_image(self, file_path: str, split_pinch: bool = True):
+    def load_image(self, file_path: str, split_pinch: bool = True,
+                   layer_name: str = "", source_name: str = "",
+                   layer_w: int = 0, layer_h: int = 0):
         file_path = resolve_mac_path(file_path)
         if not file_path or not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
-        img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise ValueError(f"Cannot read image: {file_path}")
-        if img.ndim == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
-        elif img.shape[2] == 3:
-            lum = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            img = np.dstack([img, np.clip(lum * 2, 0, 255).astype(np.uint8)])
 
-        self.file_path = file_path
-        self.img_bgra = img
-        self.h, self.w = img.shape[:2]
-        self.alpha = img[:, :, 3]
+        if file_path.lower().endswith(".psd"):
+            img, b64_str, matched_src = extract_psd_layer_bgra(
+                file_path, layer_name=layer_name, source_name=source_name,
+                layer_w=int(layer_w or 0), layer_h=int(layer_h or 0)
+            )
+            self.file_path = file_path
+            self.layer_name = layer_name or (matched_src.split("/")[0] if "/" in matched_src else "")
+            self.source_name = matched_src
+            self.layer_w = int(layer_w or img.shape[1])
+            self.layer_h = int(layer_h or img.shape[0])
+            self.img_bgra = img
+            self.h, self.w = img.shape[:2]
+            self.alpha = img[:, :, 3]
+            self.preview_b64 = b64_str
+        else:
+            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise ValueError(f"Cannot read image: {file_path}")
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+            elif img.shape[2] == 3:
+                lum = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img = np.dstack([img, np.clip(lum * 2, 0, 255).astype(np.uint8)])
 
-        with open(file_path, "rb") as f:
-            self.preview_b64 = "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+            self.file_path = file_path
+            self.layer_name = layer_name
+            self.source_name = source_name
+            self.layer_w = int(layer_w or img.shape[1])
+            self.layer_h = int(layer_h or img.shape[0])
+            self.img_bgra = img
+            self.h, self.w = img.shape[:2]
+            self.alpha = img[:, :, 3]
+
+            with open(file_path, "rb") as f:
+                self.preview_b64 = "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
 
         self._detect_blocks(split_pinch=split_pinch)
 
@@ -540,15 +660,27 @@ class ImageClusterState:
             x, y, w, h, area = sw[i]
             f_area = int(np.sum((lw[y:y + h, x:x + w] == i) & (face_bin[y:y + h, x:x + w] > 0)))
             f_sol = f_area / float(max(1, w * h))
-            if 1200 <= area < 9500 and w < 145 and h < 155 and f_sol <= 0.34 and 0.68 <= (w / float(max(1, h))) <= 1.28:
-                norm_gray[y:y + h, x:x + w][lw[y:y + h, x:x + w] == i] = 255
-                icon_seeds.append({
-                    "mask": (lw == i),
-                    "x": int(x), "y": int(y), "w": int(w), "h": int(h),
-                    "cx": float(cw[i][0]), "cy": float(cw[i][1]),
-                    "text": "✨", "is_icon": True
-                })
-                continue
+            if 1000 <= area < 14000 and w < 185 and h < 230 and f_sol <= 0.36 and 0.65 <= (w / float(max(1, h))) <= 1.32:
+                # Ensure it is not a letter (e.g. 'Y') sitting on the exact same baseline as an adjacent letter
+                on_letter_baseline = False
+                for j in range(1, nw):
+                    if j == i:
+                        continue
+                    ox, oy, ow, oh, oarea = sw[j]
+                    if oh >= 85 and oarea >= 7000:
+                        h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
+                        if h_gap < 25 and abs((y + h) - (oy + oh)) <= 12 and abs(y - oy) <= 35:
+                            on_letter_baseline = True
+                            break
+                if not on_letter_baseline:
+                    norm_gray[y:y + h, x:x + w][lw[y:y + h, x:x + w] == i] = 255
+                    icon_seeds.append({
+                        "mask": (lw == i),
+                        "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                        "cx": float(cw[i][0]), "cy": float(cw[i][1]),
+                        "text": "✨", "is_icon": True
+                    })
+                    continue
             if h >= 85 and area >= 7000:
                 seeds.append({
                     "mask": (lw == i),
@@ -562,7 +694,7 @@ class ImageClusterState:
         for i in range(1, nc_raw):
             x, y, w, h, area = sc_raw[i]
             sol = area / float(max(1, w * h))
-            if 1000 <= area < 9200 and w < 140 and h < 155 and sol <= 0.54 and 0.68 <= (w / float(max(1, h))) <= 1.25:
+            if 1000 <= area < 14000 and w < 185 and h < 230 and sol <= 0.54 and 0.65 <= (w / float(max(1, h))) <= 1.28:
                 # Exclude diacritics sitting directly above/below a word seed
                 is_diacritic = False
                 for sd in seeds:
@@ -575,6 +707,7 @@ class ImageClusterState:
                     continue
                 m_raw = (lc_raw == i)
                 if not any(np.any(m_raw & ic["mask"]) for ic in icon_seeds) and not any(np.any(m_raw & sd["mask"]) for sd in seeds):
+                    norm_gray[y:y + h, x:x + w][m_raw[y:y + h, x:x + w]] = 255
                     icon_seeds.append({
                         "mask": m_raw,
                         "x": int(x), "y": int(y), "w": int(w), "h": int(h),
@@ -1040,7 +1173,8 @@ STATE = ImageClusterState()
 
 def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
                         expansion: float = 0.0, center_anchor: bool = True,
-                        custom_names: dict = None, out_path: str = "") -> str:
+                        custom_names: dict = None, out_path: str = "",
+                        layer_name: str = "", source_name: str = "") -> str:
     file_path_js = file_path.replace("\\", "/")
     base_name = os.path.basename(file_path_js)
 
@@ -1058,6 +1192,8 @@ def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
     payload_json = json.dumps({
         "filePath": file_path_js,
         "baseName": base_name,
+        "layerName": layer_name or "",
+        "sourceName": source_name or "",
         "feather": float(feather),
         "expansion": float(expansion),
         "centerAnchor": bool(center_anchor),
@@ -1072,7 +1208,15 @@ def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
         function matchLayerFile(l) {{
             if (!l || !l.source || !l.source.file) return false;
             var lp = l.source.file.fsName.replace(/\\\\/g, "/");
-            return (lp === data.filePath || l.source.file.name === data.baseName);
+            var fileMatched = (lp === data.filePath || l.source.file.name === data.baseName);
+            if (!fileMatched) return false;
+            if (data.sourceName && l.source.name) {{
+                return (l.source.name === data.sourceName);
+            }}
+            if (data.layerName && lp.toLowerCase().indexOf(".psd") !== -1) {{
+                return (l.name === data.layerName || (l.source.name && l.source.name.indexOf(data.layerName + "/") === 0));
+            }}
+            return true;
         }}
         function isSplitLayer(l) {{
             return (l && (l.comment === "AE_TEXT_CLUSTER_SPLIT" || l.name.indexOf("[Cụm ") === 0));
@@ -1129,8 +1273,10 @@ def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
                     if (item instanceof FootageItem && item.file) {{
                         var ip = item.file.fsName.replace(/\\\\/g, "/");
                         if (ip === data.filePath || item.file.name === data.baseName) {{
-                            footageItem = item;
-                            break;
+                            if (!data.sourceName || item.name === data.sourceName) {{
+                                footageItem = item;
+                                break;
+                            }}
                         }}
                     }}
                 }}
@@ -1247,7 +1393,8 @@ def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
 
 def push_clusters_to_ae(file_path: str, clusters: list, feather: float = 5.0,
                         expansion: float = 0.0, center_anchor: bool = True,
-                        custom_names: dict = None) -> dict:
+                        custom_names: dict = None, layer_name: str = "",
+                        source_name: str = "") -> dict:
     out_path = str(Path(tempfile.gettempdir()) / "ae_splitter_out.json").replace("\\", "/")
     jsx_code = build_push_jsx_code(
         file_path=file_path,
@@ -1256,7 +1403,9 @@ def push_clusters_to_ae(file_path: str, clusters: list, feather: float = 5.0,
         expansion=expansion,
         center_anchor=center_anchor,
         custom_names=custom_names,
-        out_path=out_path
+        out_path=out_path,
+        layer_name=layer_name,
+        source_name=source_name
     )
     raw = run_ae_jsx(jsx_code)
     bring_app_to_front("Adobe After Effects")
@@ -1327,13 +1476,35 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         function isImageFile(fileObj) {{
             if (!fileObj) return false;
             var nm = fileObj.name.toLowerCase();
-            return (nm.indexOf(".png") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1);
+            return (nm.indexOf(".png") !== -1 || nm.indexOf(".psd") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1);
         }}
         function isImageLayer(l) {{
             return (l && l.source && l.source.file && isImageFile(l.source.file));
         }}
         function isSplitLayer(l) {{
             return (l && (l.comment === "AE_TEXT_CLUSTER_SPLIT" || l.name.indexOf("[Cụm ") === 0));
+        }}
+        function makeLayerInfo(l, compName) {{
+            return {{
+                path: l.source.file.fsName,
+                layerName: l.name || "",
+                sourceName: (l.source && l.source.name) ? l.source.name : "",
+                layerWidth: l.width || 0,
+                layerHeight: l.height || 0,
+                label: l.name + " (" + compName + ")"
+            }};
+        }}
+        function makeFootageInfo(item) {{
+            var lName = item.name || "";
+            if (lName.indexOf("/") !== -1) lName = lName.split("/")[0];
+            return {{
+                path: item.file.fsName,
+                layerName: lName,
+                sourceName: item.name || "",
+                layerWidth: item.width || 0,
+                layerHeight: item.height || 0,
+                label: item.name + " (Project Panel)"
+            }};
         }}
 
         var act = app.project.activeItem;
@@ -1343,53 +1514,50 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
                 for (var s = 0; s < act.selectedLayers.length; s++) {{
                     var sl = act.selectedLayers[s];
                     if (isImageLayer(sl)) {{
-                        return {{ path: sl.source.file.fsName, label: sl.name + " (" + act.name + ")" }};
+                        return makeLayerInfo(sl, act.name);
                     }}
                     if (sl.source && (sl.source instanceof CompItem)) {{
                         var sub = sl.source;
                         for (var k = 1; k <= sub.numLayers; k++) {{
                             if (isImageLayer(sub.layer(k))) {{
-                                return {{ path: sub.layer(k).source.file.fsName, label: sub.layer(k).name + " (" + sub.name + ")" }};
+                                return makeLayerInfo(sub.layer(k), sub.name);
                             }}
                         }}
                     }}
                 }}
             }}
+            for (var i = 1; i <= act.numLayers; i++) {{
+                var l = act.layer(i);
+                if (isImageLayer(l) && !isSplitLayer(l)) {{
+                    return makeLayerInfo(l, act.name);
+                }}
+            }}
+            for (var i2 = 1; i2 <= act.numLayers; i2++) {{
+                var l2 = act.layer(i2);
+                if (isImageLayer(l2)) {{
+                    return makeLayerInfo(l2, act.name);
+                }}
+            }}
+        }}
+
+        if (act && (act instanceof FootageItem) && act.file && isImageFile(act.file)) {{
+            return makeFootageInfo(act);
         }}
 
         if (app.project.selection && app.project.selection.length > 0) {{
             for (var p = 0; p < app.project.selection.length; p++) {{
                 var sel = app.project.selection[p];
                 if (sel instanceof FootageItem && sel.file && isImageFile(sel.file)) {{
-                    return {{ path: sel.file.fsName, label: sel.name + " (Project Panel)" }};
+                    return makeFootageInfo(sel);
                 }}
                 if (sel instanceof CompItem) {{
                     for (var j = 1; j <= sel.numLayers; j++) {{
                         var lj = sel.layer(j);
                         if (isImageLayer(lj) && !isSplitLayer(lj)) {{
                             sel.openInViewer();
-                            return {{ path: lj.source.file.fsName, label: lj.name + " (" + sel.name + ")" }};
+                            return makeLayerInfo(lj, sel.name);
                         }}
                     }}
-                }}
-            }}
-        }}
-
-        if (act && (act instanceof FootageItem) && act.file && isImageFile(act.file)) {{
-            return {{ path: act.file.fsName, label: act.name + " (Project Panel)" }};
-        }}
-
-        if (act && (act instanceof CompItem)) {{
-            for (var i = 1; i <= act.numLayers; i++) {{
-                var l = act.layer(i);
-                if (isImageLayer(l) && !isSplitLayer(l)) {{
-                    return {{ path: l.source.file.fsName, label: l.name + " (" + act.name + ")" }};
-                }}
-            }}
-            for (var i2 = 1; i2 <= act.numLayers; i2++) {{
-                var l2 = act.layer(i2);
-                if (isImageLayer(l2)) {{
-                    return {{ path: l2.source.file.fsName, label: l2.name + " (" + act.name + ")" }};
                 }}
             }}
         }}
@@ -1516,9 +1684,17 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             }}
         }}
 
-        function loadFileByPath(fp) {{
-            var cleanPath = fp.replace(/\\\\/g, "/").replace(/"/g, '\\\\"');
-            writeReqJson('{{"file": "' + cleanPath + '"}}');
+        function escJson(s) {{
+            return String(s || "").replace(/\\\\/g, "/").replace(/"/g, '\\\\"');
+        }}
+
+        function loadFileByPath(fp, info) {{
+            var cleanPath = escJson(fp);
+            var lName = info ? escJson(info.layerName) : "";
+            var sName = info ? escJson(info.sourceName) : "";
+            var lw = (info && info.layerWidth) ? info.layerWidth : 0;
+            var lh = (info && info.layerHeight) ? info.layerHeight : 0;
+            writeReqJson('{{"file": "' + cleanPath + '", "layerName": "' + lName + '", "sourceName": "' + sName + '", "layerWidth": ' + lw + ', "layerHeight": ' + lh + '}}');
             var res = callApi("/api/su_init_from_req", "");
             refreshPreview(res);
         }}
@@ -1526,10 +1702,10 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         function loadCurrentFromAE() {{
             var info = detectSelectedLayerOrItemInAE();
             if (!info || !info.path) {{
-                statusTxt.text = "⚠️ Hãy click chọn 1 Layer PNG trên Timeline hoặc trong Project Panel!";
+                statusTxt.text = "⚠️ Hãy click chọn 1 Layer PNG/PSD trên Timeline hoặc trong Project Panel!";
                 return;
             }}
-            loadFileByPath(info.path);
+            loadFileByPath(info.path, info);
         }}
 
         btnFetch.onClick = function() {{
@@ -2059,6 +2235,10 @@ const PALETTE = [
 ];
 
 let currentFile = "";
+let currentLayerName = "";
+let currentSourceName = "";
+let currentLayerWidth = 0;
+let currentLayerHeight = 0;
 let imgObj = new Image();
 let blocks = [];
 let clusterMasks = [];
@@ -2114,9 +2294,12 @@ async function fetchFromAE(silentFallback = false) {
   }
   if (res.ok && res.state) {
     loadState(res.state);
-    setStatus(`Đã tải <b>${res.state.filePath.split("/").pop()}</b> (${res.state.blocks.length} từ/icon).`, "ok");
+    const baseLabel = res.state.layerName
+      ? `${res.state.layerName} [${res.state.filePath.split("/").pop()}]`
+      : res.state.filePath.split("/").pop();
+    setStatus(`Đã tải <b>${baseLabel}</b> (${res.state.blocks.length} từ/icon).`, "ok");
   } else {
-    setStatus(res.error || "Không tìm thấy layer PNG.", "err");
+    setStatus(res.error || "Không tìm thấy layer PNG/PSD.", "err");
   }
 }
 
@@ -2129,7 +2312,10 @@ async function onSelectFile(filePath) {
   }).then(r => r.json());
   if (res.ok) {
     loadState(res.state);
-    setStatus(`Đã phân tích <b>${filePath.split("/").pop()}</b> (${res.state.blocks.length} từ/icon).`, "ok");
+    const baseLabel = res.state.layerName
+      ? `${res.state.layerName} [${filePath.split("/").pop()}]`
+      : filePath.split("/").pop();
+    setStatus(`Đã phân tích <b>${baseLabel}</b> (${res.state.blocks.length} từ/icon).`, "ok");
   } else {
     setStatus(res.error, "err");
   }
@@ -2140,7 +2326,14 @@ async function reDetect(splitPinch) {
   const res = await fetch("/api/load_file", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({filePath: currentFile, splitPinch})
+    body: JSON.stringify({
+      filePath: currentFile,
+      layerName: currentLayerName,
+      sourceName: currentSourceName,
+      layerWidth: currentLayerWidth,
+      layerHeight: currentLayerHeight,
+      splitPinch
+    })
   }).then(r => r.json());
   if (res.ok) {
     loadState(res.state);
@@ -2150,6 +2343,10 @@ async function reDetect(splitPinch) {
 
 function loadState(state) {
   currentFile = state.filePath;
+  currentLayerName = state.layerName || "";
+  currentSourceName = state.sourceName || "";
+  currentLayerWidth = state.layerWidth || 0;
+  currentLayerHeight = state.layerHeight || 0;
   blocks = state.blocks;
   clusterMasks = state.clusters || [];
   clusterNames = {};
@@ -2503,6 +2700,8 @@ async function pushToAE() {
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({
       filePath: currentFile,
+      layerName: currentLayerName,
+      sourceName: currentSourceName,
       clusters: clusterMasks,
       feather,
       expansion,
@@ -2535,6 +2734,10 @@ def serialize_state() -> dict:
     STATE.render_scriptui_preview(clusters)
     return {
         "filePath": STATE.file_path,
+        "layerName": STATE.layer_name,
+        "sourceName": STATE.source_name,
+        "layerWidth": STATE.layer_w,
+        "layerHeight": STATE.layer_h,
         "w": STATE.w,
         "h": STATE.h,
         "blocks": STATE.blocks,
@@ -2549,7 +2752,10 @@ def list_sibling_pngs(file_path: str) -> list:
     folder = os.path.dirname(file_path)
     if not os.path.isdir(folder):
         return [file_path]
-    return sorted(glob.glob(os.path.join(folder, "*.png")))
+    files = glob.glob(os.path.join(folder, "*.png")) + glob.glob(os.path.join(folder, "*.psd"))
+    if file_path not in files and os.path.exists(file_path):
+        files.append(file_path)
+    return sorted(set(files))
 
 
 def serialize_scriptui_summary() -> dict:
@@ -2558,6 +2764,8 @@ def serialize_scriptui_summary() -> dict:
     return {
         "ok": True,
         "filePath": STATE.file_path,
+        "layerName": STATE.layer_name,
+        "sourceName": STATE.source_name,
         "files": list_sibling_pngs(STATE.file_path),
         "previewPath": preview_path,
         "blockCount": len(STATE.blocks),
@@ -2599,7 +2807,13 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
             target_file = ae_info.get("filePath") if ae_info.get("ok") else STATE.file_path
             target_file = resolve_mac_path(target_file)
             if target_file and os.path.exists(target_file):
-                STATE.load_image(target_file)
+                STATE.load_image(
+                    target_file,
+                    layer_name=ae_info.get("layerName", "") if ae_info.get("ok") else STATE.layer_name,
+                    source_name=ae_info.get("sourceName", "") if ae_info.get("ok") else STATE.source_name,
+                    layer_w=int(ae_info.get("layerWidth", 0) or 0) if ae_info.get("ok") else STATE.layer_w,
+                    layer_h=int(ae_info.get("layerHeight", 0) or 0) if ae_info.get("ok") else STATE.layer_h
+                )
                 self._send_json({
                     "ok": True,
                     "ae": ae_info,
@@ -2617,25 +2831,35 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/su_init_from_req":
             req_file = Path(tempfile.gettempdir()) / "ae_splitter_req.json"
             fp = ""
+            l_name = ""
+            s_name = ""
+            l_w = 0
+            l_h = 0
             if req_file.exists():
                 try:
                     req_data = json.loads(req_file.read_text(encoding="utf-8"))
                     fp = resolve_mac_path(req_data.get("file", ""))
+                    l_name = req_data.get("layerName", "") or ""
+                    s_name = req_data.get("sourceName", "") or ""
+                    l_w = int(req_data.get("layerWidth", 0) or 0)
+                    l_h = int(req_data.get("layerHeight", 0) or 0)
                 except Exception:
                     pass
             if fp and os.path.exists(fp):
-                STATE.load_image(fp)
+                STATE.load_image(fp, layer_name=l_name, source_name=s_name, layer_w=l_w, layer_h=l_h)
             if not STATE.file_path:
-                self._send_json({"ok": False, "error": "Không tìm thấy file PNG."})
+                self._send_json({"ok": False, "error": "Không tìm thấy file PNG/PSD."})
                 return
             self._send_json(serialize_scriptui_summary())
 
         elif parsed.path == "/api/su_init":
             fp = resolve_mac_path(qs.get("file", [""])[0])
+            l_name = qs.get("layerName", [""])[0]
+            s_name = qs.get("sourceName", [""])[0]
             if fp and os.path.exists(fp):
-                STATE.load_image(fp)
+                STATE.load_image(fp, layer_name=l_name, source_name=s_name)
             if not STATE.file_path:
-                self._send_json({"ok": False, "error": "Chưa có file PNG."})
+                self._send_json({"ok": False, "error": "Chưa có file PNG/PSD."})
                 return
             self._send_json(serialize_scriptui_summary())
 
@@ -2675,7 +2899,9 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
                 feather=feather,
                 expansion=0.0,
                 center_anchor=center_anchor,
-                out_path=""
+                out_path="",
+                layer_name=STATE.layer_name,
+                source_name=STATE.source_name
             )
             jsx_push_path.write_text(jsx_push_code, encoding="utf-8")
             self._send_json({
@@ -2698,7 +2924,19 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
             if not fp or not os.path.exists(fp):
                 self._send_json({"ok": False, "error": f"Không tìm thấy file: {fp}"})
                 return
-            STATE.load_image(fp, split_pinch=split_pinch)
+            same_file = (fp == STATE.file_path)
+            l_name = data.get("layerName") if "layerName" in data else (STATE.layer_name if same_file else "")
+            s_name = data.get("sourceName") if "sourceName" in data else (STATE.source_name if same_file else "")
+            l_w = int(data.get("layerWidth", 0) or (STATE.layer_w if same_file else 0))
+            l_h = int(data.get("layerHeight", 0) or (STATE.layer_h if same_file else 0))
+            STATE.load_image(
+                fp,
+                split_pinch=split_pinch,
+                layer_name=l_name or "",
+                source_name=s_name or "",
+                layer_w=l_w,
+                layer_h=l_h
+            )
             self._send_json({"ok": True, "state": serialize_state()})
 
         elif self.path == "/api/compute_masks":
@@ -2729,7 +2967,9 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
                 feather=float(data.get("feather", 5.0)),
                 expansion=float(data.get("expansion", 0.0)),
                 center_anchor=bool(data.get("centerAnchor", True)),
-                custom_names=data.get("customNames", {})
+                custom_names=data.get("customNames", {}),
+                layer_name=data.get("layerName") or STATE.layer_name,
+                source_name=data.get("sourceName") or STATE.source_name
             )
             self._send_json(res)
         else:
@@ -2880,13 +3120,27 @@ def main():
         return
 
     init_file = resolve_mac_path(args.file)
+    init_layer_name = ""
+    init_source_name = ""
+    init_lw = 0
+    init_lh = 0
     if not init_file:
         ae_info = get_active_ae_layer_info()
         if ae_info.get("ok") and os.path.exists(ae_info.get("filePath", "")):
             init_file = ae_info["filePath"]
+            init_layer_name = ae_info.get("layerName", "")
+            init_source_name = ae_info.get("sourceName", "")
+            init_lw = int(ae_info.get("layerWidth", 0) or 0)
+            init_lh = int(ae_info.get("layerHeight", 0) or 0)
 
     if init_file and os.path.exists(init_file):
-        STATE.load_image(init_file)
+        STATE.load_image(
+            init_file,
+            layer_name=init_layer_name,
+            source_name=init_source_name,
+            layer_w=init_lw,
+            layer_h=init_lh
+        )
         STATE.render_scriptui_preview()
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), SplitterRequestHandler)
