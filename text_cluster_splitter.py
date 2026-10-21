@@ -175,7 +175,7 @@ def get_active_ae_layer_info() -> dict:
         function isImageFile(fileObj) {{
             if (!fileObj) return false;
             var nm = fileObj.name.toLowerCase();
-            return (nm.indexOf(".png") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1 || nm.indexOf(".psd") !== -1);
+            return (nm.indexOf(".png") !== -1 || nm.indexOf(".psd") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1 || nm.indexOf(".tif") !== -1 || nm.indexOf(".tiff") !== -1 || nm.indexOf(".bmp") !== -1);
         }}
         function isImageLayer(l) {{
             return (l && l.source && l.source.file && isImageFile(l.source.file));
@@ -318,8 +318,8 @@ VN_WORD_FIXES = {
     "ĐÔ": "ĐỒ", "ĐỐ": "ĐỒ", "ĐỔ": "ĐỒ", "ĐỖ": "ĐỒ",
     "VỚ": "VỚI", "GIẶI": "GIẶT", "NHẠNH": "NHANH",
     "AO": "ÁO", "ĐE": "ĐỂ", "ĐỀ": "ĐỂ", "CO": "CÓ",
-    "PHỐT": "PHÚT", "PHOT": "PHÚT", "CUNG": "CÙNG",
-    "ĐÀI": "DÀI",
+    "PHỐT": "PHÚT", "PHOT": "PHÚT", "PHUT": "PHÚT", "CUNG": "CÙNG",
+    "ĐÀI": "DÀI", "TỐO": "TỐC", "TOO": "TỐC", "TOC": "TỐC",
 }
 
 VIETOCR_VOCAB_CHARS = (
@@ -464,7 +464,8 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
             core_w = VN_WORD_FIXES[core_w]
             base = strip_accents(core_w)
         for hw in hint_words:
-            if strip_accents(hw) == base:
+            hw_base = strip_accents(hw)
+            if hw_base == base or (len(base) >= 3 and len(hw_base) == len(base) and sum(c1 != c2 for c1, c2 in zip(hw_base, base)) <= 1):
                 core_w = hw
                 break
         out_tokens.append(core_w + punct)
@@ -553,9 +554,62 @@ def extract_psd_layer_bgra(file_path: str, layer_name: str = "", source_name: st
 
     rgba_arr = np.asarray(pil_img)
     img_bgra = cv2.cvtColor(rgba_arr, cv2.COLOR_RGBA2BGRA)
+    if np.percentile(img_bgra[:, :, 3], 5) >= 250:
+        img_bgra[:, :, 3] = synthesize_alpha_from_bgr(img_bgra[:, :, :3])
     ok_enc, png_buf = cv2.imencode(".png", img_bgra)
     b64_str = "data:image/png;base64," + base64.b64encode(png_buf.tobytes()).decode("ascii") if ok_enc else ""
     return img_bgra, b64_str, matched_src
+
+
+def synthesize_alpha_from_bgr(img_bgr: np.ndarray) -> np.ndarray:
+    """Synthesizes an alpha channel (255 on solid text/3D stroke, 1..220 on soft glow, 0 on background)
+    for 3-channel RGB images (.jpg/.jpeg/.bmp) or flattened opaque layers regardless of background color."""
+    h, w = img_bgr.shape[:2]
+    c_sz = max(4, min(h, w) // 25)
+    corners = np.concatenate([
+        img_bgr[:c_sz, :c_sz].reshape(-1, 3),
+        img_bgr[:c_sz, w - c_sz:].reshape(-1, 3),
+        img_bgr[h - c_sz:, :c_sz].reshape(-1, 3),
+        img_bgr[h - c_sz:, w - c_sz:].reshape(-1, 3),
+    ], axis=0).astype(np.float32)
+    bg_med = np.median(corners, axis=0)
+
+    img_f = img_bgr.astype(np.float32)
+    diff_max = np.max(np.abs(img_f - bg_med.reshape(1, 1, 3)), axis=2)
+
+    corner_diff = np.max(np.abs(corners - bg_med.reshape(1, 3)), axis=1)
+    bg_noise = float(np.percentile(corner_diff, 85)) if corner_diff.size > 0 else 4.0
+    floor_val = max(6.0, min(20.0, bg_noise * 1.6))
+
+    fg = np.maximum(0.0, diff_max - floor_val)
+    fg_active = fg[fg > 5.0]
+    core_ref = float(np.clip(np.percentile(fg_active, 60), 40.0, 160.0)) if fg_active.size > 0 else 80.0
+
+    # Soft outer glow gets alpha 1..220 so Voronoi masks preserve the glow without merging into solid core
+    alpha = np.clip((fg / core_ref) * 220.0, 0.0, 220.0).astype(np.uint8)
+    alpha[fg < 3.0] = 0
+
+    # Solid core (255) from sharp 3x3 morphological edges + interior hole filling
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    grad3 = np.max(cv2.dilate(img_bgr, k3).astype(np.int16) - cv2.erode(img_bgr, k3).astype(np.int16), axis=2)
+    sharp_ring = ((grad3 >= 26) & (diff_max >= max(22.0, floor_val * 1.8))).astype(np.uint8)
+    sharp_ring = cv2.morphologyEx(sharp_ring, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+
+    inv_bg = (sharp_ring == 0).astype(np.uint8)
+    num_bg, lbl_bg, stats_bg, _ = cv2.connectedComponentsWithStats(inv_bg)
+    border_labels = (
+        set(np.unique(lbl_bg[0, :])) | set(np.unique(lbl_bg[-1, :])) |
+        set(np.unique(lbl_bg[:, 0])) | set(np.unique(lbl_bg[:, -1]))
+    )
+    solid_core = sharp_ring.copy()
+    max_hole_area = int(h * w * 0.25)
+    for lbl in range(1, num_bg):
+        if lbl not in border_labels and stats_bg[lbl, cv2.CC_STAT_AREA] < max_hole_area:
+            solid_core[lbl_bg == lbl] = 1
+
+    solid_core = cv2.morphologyEx(solid_core, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    alpha[solid_core > 0] = 255
+    return alpha
 
 
 class ImageClusterState:
@@ -605,12 +659,19 @@ class ImageClusterState:
         else:
             img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if img is None:
-                raise ValueError(f"Cannot read image: {file_path}")
+                from PIL import Image
+                pil_in = Image.open(file_path).convert("RGBA")
+                img = cv2.cvtColor(np.asarray(pil_in), cv2.COLOR_RGBA2BGRA)
             if img.ndim == 2:
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                syn_a = synthesize_alpha_from_bgr(img_bgr)
+                img = np.dstack([img_bgr, syn_a])
             elif img.shape[2] == 3:
-                lum = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                img = np.dstack([img, np.clip(lum * 2, 0, 255).astype(np.uint8)])
+                syn_a = synthesize_alpha_from_bgr(img)
+                img = np.dstack([img, syn_a])
+            elif img.shape[2] == 4 and np.percentile(img[:, :, 3], 5) >= 250:
+                img = img.copy()
+                img[:, :, 3] = synthesize_alpha_from_bgr(img[:, :, :3])
 
             self.file_path = file_path
             self.layer_name = layer_name
@@ -621,8 +682,12 @@ class ImageClusterState:
             self.h, self.w = img.shape[:2]
             self.alpha = img[:, :, 3]
 
-            with open(file_path, "rb") as f:
-                self.preview_b64 = "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+            ok_enc, png_buf = cv2.imencode(".png", self.img_bgra)
+            if ok_enc:
+                self.preview_b64 = "data:image/png;base64," + base64.b64encode(png_buf.tobytes()).decode("ascii")
+            else:
+                with open(file_path, "rb") as f:
+                    self.preview_b64 = "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
 
         self._detect_blocks(split_pinch=split_pinch)
 
@@ -656,6 +721,8 @@ class ImageClusterState:
 
         seeds = []
         icon_seeds = []
+        min_seed_h = max(48, min(85, int(self.h * 0.14)))
+        min_seed_area = max(2500, min(7000, int(self.h * self.w * 0.012)))
         for i in range(1, nw):
             x, y, w, h, area = sw[i]
             f_area = int(np.sum((lw[y:y + h, x:x + w] == i) & (face_bin[y:y + h, x:x + w] > 0)))
@@ -667,7 +734,7 @@ class ImageClusterState:
                     if j == i:
                         continue
                     ox, oy, ow, oh, oarea = sw[j]
-                    if oh >= 85 and oarea >= 7000:
+                    if oh >= min_seed_h and oarea >= min_seed_area:
                         h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
                         if h_gap < 25 and abs((y + h) - (oy + oh)) <= 12 and abs(y - oy) <= 35:
                             on_letter_baseline = True
@@ -681,7 +748,7 @@ class ImageClusterState:
                         "text": "✨", "is_icon": True
                     })
                     continue
-            if h >= 85 and area >= 7000:
+            if h >= min_seed_h and area >= min_seed_area:
                 seeds.append({
                     "mask": (lw == i),
                     "x": int(x), "y": int(y), "w": int(w), "h": int(h),
@@ -1476,7 +1543,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         function isImageFile(fileObj) {{
             if (!fileObj) return false;
             var nm = fileObj.name.toLowerCase();
-            return (nm.indexOf(".png") !== -1 || nm.indexOf(".psd") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1);
+            return (nm.indexOf(".png") !== -1 || nm.indexOf(".psd") !== -1 || nm.indexOf(".jpg") !== -1 || nm.indexOf(".jpeg") !== -1 || nm.indexOf(".webp") !== -1 || nm.indexOf(".tif") !== -1 || nm.indexOf(".tiff") !== -1 || nm.indexOf(".bmp") !== -1);
         }}
         function isImageLayer(l) {{
             return (l && l.source && l.source.file && isImageFile(l.source.file));
@@ -2752,7 +2819,10 @@ def list_sibling_pngs(file_path: str) -> list:
     folder = os.path.dirname(file_path)
     if not os.path.isdir(folder):
         return [file_path]
-    files = glob.glob(os.path.join(folder, "*.png")) + glob.glob(os.path.join(folder, "*.psd"))
+    exts = ("*.png", "*.psd", "*.jpg", "*.jpeg", "*.webp", "*.tif", "*.tiff", "*.bmp")
+    files = []
+    for pat in exts:
+        files.extend(glob.glob(os.path.join(folder, pat)))
     if file_path not in files and os.path.exists(file_path):
         files.append(file_path)
     return sorted(set(files))
