@@ -462,11 +462,18 @@
         btnGear.onClick = function() {
             var showAdv = !paramPanel.visible;
             paramPanel.visible = showAdv;
-            paramPanel.maximumSize.height = showAdv ? 140 : 0;
-            contentGrp.size = undefined;
-            win.layout.layout(true);
-            win.layout.resize();
+            paramPanel.maximumSize.height = showAdv ? 220 : 0;
+            // Re-layout ONLY the scrollable content (never win.layout.layout(true): that re-runs the layout
+            // manager on the whole panel and overwrites the manually clipped viewport / scrollbar bounds).
+            // Give the content group room first so ScriptUI doesn't squeeze rows while re-laying them out.
+            var cw = (contentGrp.size && contentGrp.size[0]) ? contentGrp.size[0] : 500;
+            contentGrp.size = [cw, 2000];
+            contentGrp.layout.layout(true);
             measureContent();
+            if (showAdv) {
+                // Scroll so the newly opened settings + action row are visible
+                vScroll.value = Math.max(0, natH - ((win.size && win.size[1]) ? win.size[1] - 8 : natH));
+            }
             updateScroll();
         };
 
