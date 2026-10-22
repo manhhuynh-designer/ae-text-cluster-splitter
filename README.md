@@ -20,6 +20,24 @@ Plugin & Script tự động nhận diện chữ Tiếng Việt có dấu (**Cro
 
 ---
 
+## 🗑 Gỡ cài đặt
+
+1. **Đóng After Effects** trước khi gỡ.
+2. Chạy file gỡ cài đặt trong thư mục này (không cần Python, vẫn chạy được khi `.venv` đã bị xóa):
+   - **macOS**: Nhấp đúp `Uninstall_Mac.command` *(Chuột phải chọn `Open` nếu macOS hỏi quyền lần đầu)*.
+   - **Windows**: Nhấp đúp `Uninstall_Windows.bat`.
+3. Script sẽ tự động:
+   - Dừng server nền `text_cluster_splitter.py` (cổng `8765`).
+   - Xóa `AE_Text_Cluster_Splitter.jsx` khỏi `Scripts/` và `Scripts/ScriptUI Panels/` của **mọi phiên bản** After Effects.
+   - Xóa CEP Extension `com.manh.textclustersplitter`.
+   - Dọn file tạm `ae_splitter_*`.
+4. Hai bước **tùy chọn** (script sẽ hỏi, mặc định là *không*):
+   - **Tắt `PlayerDebugMode`**: cài đặt này dùng chung cho mọi CEP extension chưa ký. Chỉ tắt nếu bạn không dùng extension CEP nào khác.
+   - **Xóa `.venv` và model ONNX (~45 MB)** trong thư mục plugin.
+5. Mở lại After Effects. Muốn xóa hẳn thì xóa luôn thư mục plugin.
+
+---
+
 ## 📖 Hướng dẫn sử dụng
 
 1. **Chọn Layer cần tách (Hỗ trợ cả `.png` và Layer trong file `.psd`)**:
