@@ -321,7 +321,7 @@ VN_WORD_FIXES = {
     "PHỐT": "PHÚT", "PHOT": "PHÚT", "PHUT": "PHÚT", "CUNG": "CỨNG",
     "ĐÀI": "DÀI", "TỐO": "TỐC", "TOO": "TỐC", "TOC": "TỐC",
     "HOI": "HÔI", "MOC": "MỐC", "LAU": "LÂU", "SACH": "SẠCH",
-    "KHU": "KHỬ", "MUI": "MÙI", "VUOT": "VƯỢT", "TROI": "TRỘI",
+    "KHU": "KHỬ", "MUI": "MÙI", "VUOT": "VƯỢT", "TROI": "TRỘI", "TRỘN": "TRỘI!",
     "VET": "VẾT", "BAN": "BẨN", "BẦN": "BẨN", "DAU": "ĐẦU",
     "BOT": "BỌT", "CUC": "CỰC", "LIÊN": "LIỀN",
     "CHOP": "CHỚP", "NHOANG": "NHOÁNG", "NUOC": "NƯỚC",
@@ -951,12 +951,53 @@ class ImageClusterState:
 
         # 3. Detect character/word blobs, attach large 3D diacritics, and filter 4-pointed star icons
         face_bin = (norm_gray < 140).astype(np.uint8)
-        self.face_bin = face_bin
+        self.face_bin = face_bin.copy()
+
+        icon_seeds = []
+        # 3A. Pre-filter 4-pointed star icons directly on undilated face_bin so stars close to text never fuse during w_bin dilation
+        nf0, lf0, sf0, cf0 = cv2.connectedComponentsWithStats(face_bin)
+        for i in range(1, nf0):
+            x, y, w, h, area = sf0[i]
+            if not (900 <= area < 16000 and w < 195 and h < 240 and 0.62 <= (w / float(max(1, h))) <= 1.38):
+                continue
+            box_sol = area / float(max(1, w * h))
+            if box_sol > 0.43:
+                continue
+            m_sub = (lf0[y:y + h, x:x + w] == i).astype(np.uint8)
+            cnts_i, _ = cv2.findContours(m_sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            hull_a = cv2.contourArea(cv2.convexHull(cnts_i[0])) if cnts_i else float(area)
+            hull_sol = area / float(max(1.0, hull_a))
+            if hull_sol > 0.71:
+                continue
+            sym_h = np.sum(m_sub & np.fliplr(m_sub)) / float(max(1, np.sum(m_sub | np.fliplr(m_sub))))
+            sym_v = np.sum(m_sub & np.flipud(m_sub)) / float(max(1, np.sum(m_sub | np.flipud(m_sub))))
+            if sym_h < 0.45 or sym_v < 0.45:
+                continue
+            same_baseline_peers = 0
+            for j in range(1, nf0):
+                if j == i:
+                    continue
+                ox, oy, ow, oh, oarea = sf0[j]
+                if oh >= 50 and oarea >= 2000:
+                    h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
+                    if abs(y - oy) <= 10 and abs((y + h) - (oy + oh)) <= 10 and h_gap <= 180:
+                        same_baseline_peers += 1
+            if same_baseline_peers == 0:
+                m_full = (lf0 == i)
+                face_bin[m_full] = 0
+                norm_gray[m_full] = 255
+                icon_seeds.append({
+                    "mask": m_full,
+                    "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                    "body_y": int(y), "body_h": int(h), "body_cy": float(cf0[i][1]),
+                    "cx": float(cf0[i][0]), "cy": float(cf0[i][1]),
+                    "text": "✨", "is_icon": True
+                })
+
         w_bin = cv2.dilate(face_bin, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 5)))
         nw, lw, sw, cw = cv2.connectedComponentsWithStats(w_bin)
 
         raw_blobs = []
-        icon_seeds = []
         for i in range(1, nw):
             x, y, w, h, area = sw[i]
             if area < 900:
@@ -1010,6 +1051,26 @@ class ImageClusterState:
                 if collinear_peers >= 3:
                     bodies.append(b)
 
+        # Attach narrow same-line punctuation/stems (e.g. '!', '?' next to 'TRỘI!' where area < std_seed_area) directly into their adjacent word body
+        body_ids = set(id(b) for b in bodies)
+        for b in raw_blobs:
+            if id(b) in body_ids:
+                continue
+            if b["h"] >= std_seed_h * 0.65 and b["area"] >= 1800:
+                for parent in bodies:
+                    v_ov = max(0, min(b["y"] + b["h"], parent["body_y"] + parent["body_h"]) - max(b["y"], parent["body_y"]))
+                    h_gap = max(0, max(b["x"] - (parent["x"] + parent["w"]), parent["x"] - (b["x"] + b["w"])))
+                    if v_ov >= b["h"] * 0.55 and h_gap <= 36:
+                        parent["mask"] = parent["mask"] | b["mask"]
+                        nx1 = min(parent["x"], b["x"])
+                        ny1 = min(parent["y"], b["y"])
+                        nx2 = max(parent["x"] + parent["w"], b["x"] + b["w"])
+                        ny2 = max(parent["y"] + parent["h"], b["y"] + b["h"])
+                        parent["x"], parent["y"], parent["w"], parent["h"] = nx1, ny1, nx2 - nx1, ny2 - ny1
+                        parent["area"] += b["area"]
+                        body_ids.add(id(b))
+                        break
+
         # Merge oversized diacritic hats (e.g. 'Ể', 'Ố' on giant 3D titles where parent body_h >= 200) into parent word
         bodies.sort(key=lambda b: b["h"], reverse=True)
         seeds = []
@@ -1054,10 +1115,15 @@ class ImageClusterState:
                 for sd in seeds:
                     ov_x = max(0, min(x + w, sd["x"] + sd["w"]) - max(x, sd["x"]))
                     v_gap = max(0, max(y - (sd["y"] + sd["h"]), sd["y"] - (y + h)))
-                    if ov_x >= w * 0.45 and v_gap < 45:
+                    if ov_x >= w * 0.35 and v_gap < max(65, int(sd["h"] * 0.35)):
                         is_diacritic = True
                         break
                 if is_diacritic:
+                    continue
+                m_sub_c = (lc_raw[y:y + h, x:x + w] == i).astype(np.uint8)
+                sym_hc = np.sum(m_sub_c & np.fliplr(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.fliplr(m_sub_c))))
+                sym_vc = np.sum(m_sub_c & np.flipud(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.flipud(m_sub_c))))
+                if sym_hc < 0.42 or sym_vc < 0.42:
                     continue
                 m_raw = (lc_raw == i)
                 if not any(np.any(m_raw & ic["mask"]) for ic in icon_seeds) and not any(np.any(m_raw & sd["mask"]) for sd in seeds):
@@ -1130,7 +1196,7 @@ class ImageClusterState:
                 best_ln = min(ordered_lines, key=lambda ln: abs(ic["cy"] - np.mean([x["cy"] for x in ln])))
                 best_ln.append(ic)
 
-        # 6. Assign all core pixels (including 3D strokes and Vietnamese diacritics) via Voronoi seed map
+        # 6. Assign all diacritics/punctuation as whole connected blobs first, then propagate 3D strokes via Voronoi seed map
         seed_map = np.zeros((self.h, self.w), dtype=np.int32)
         ordered_items = []
         sid = 1
@@ -1143,8 +1209,57 @@ class ImageClusterState:
                 ordered_items.append(b)
                 sid += 1
 
+        # Whole-blob attachment for all remaining w_bin / face_bin components (diacritics ^, ´, `, ?, ~, . and punctuation dots)
+        # Prevents pixel-level Voronoi from slicing diacritics or '!' stems in half between two adjacent lines
+        text_items = [b for b in ordered_items if not b.get("is_icon")]
+        if text_items:
+            for comp_i in range(1, nw):
+                cx1, cy1, cw_c, ch_c, carea = sw[comp_i]
+                if carea < 45:
+                    continue
+                cmask_i = (lw == comp_i)
+                # Skip if already mostly assigned to a seed or icon
+                if np.mean(seed_map[cmask_i] > 0) >= 0.45:
+                    continue
+                ccx, ccy = float(cw[comp_i][0]), float(cw[comp_i][1])
+                best_item = None
+                best_cost = 1e12
+                for w_item in text_items:
+                    wx1, wy1, ww_w, wh_w = w_item["x"], w_item["y"], w_item["w"], w_item["h"]
+                    h_dist = max(0.0, float(max(cx1 - (wx1 + ww_w), wx1 - (cx1 + cw_c))))
+                    v_ov = max(0, min(cy1 + ch_c, wy1 + wh_w) - max(cy1, wy1))
+                    if v_ov >= ch_c * 0.35:
+                        # Same horizontal line (e.g. '!', '?', '.', or broken stroke)
+                        cost = h_dist * 1.15 + abs(ccy - w_item["cy"]) * 0.25
+                    elif (cy1 + ch_c) <= (wy1 + 18):
+                        # Component is ABOVE w_item -> Vietnamese upper diacritic (^, ´, `, ?, ~, ˘)
+                        v_gap_above = max(0.0, float(wy1 - (cy1 + ch_c)))
+                        cost = v_gap_above * 1.0 + h_dist * 2.2
+                    else:
+                        # Component is BELOW w_item -> Only valid if it is a compact dot (dấu nặng '.' or dot of '!'/'?')
+                        v_gap_below = max(0.0, float(cy1 - (wy1 + wh_w)))
+                        is_compact_dot = (
+                            cw_c <= max(45, int(wh_w * 0.45)) and
+                            ch_c <= max(42, int(wh_w * 0.38)) and
+                            (cw_c / float(max(1, ch_c))) <= 1.85 and
+                            v_gap_below <= max(36.0, wh_w * 0.22)
+                        )
+                        if is_compact_dot:
+                            cost = v_gap_below * 1.15 + h_dist * 2.2
+                        else:
+                            # Penalize heavily so upper line never steals lower line's wide diacritic hat or '!' stem
+                            cost = v_gap_below * 3.5 + h_dist * 2.5 + 450.0
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_item = w_item
+                if best_item is not None:
+                    unassigned = cmask_i & (seed_map == 0)
+                    seed_map[unassigned] = best_item["final_id"]
+                    best_item["mask"] = best_item["mask"] | unassigned
+
         if ordered_items:
-            _, inds = distance_transform_edt(seed_map == 0, sampling=(0.65, 1.0), return_indices=True)
+            # Use sampling=(1.2, 1.0) so outer 3D strokes/extrusion prefer horizontal same-line connection over jumping across lines
+            _, inds = distance_transform_edt(seed_map == 0, sampling=(1.2, 1.0), return_indices=True)
             nearest_seed = seed_map[inds[0], inds[1]]
             self.label_map = np.where(core > 0, nearest_seed, 0).astype(np.int32)
         else:
@@ -1251,9 +1366,9 @@ class ImageClusterState:
 
         bx, by, bw, bh = hit_block["x"], hit_block["y"], hit_block["w"], hit_block["h"]
         rel_x = int(round(ix - bx))
-        if bw > 36 and self.face_mask is not None:
+        if bw > 36 and getattr(self, "face_bin", None) is not None:
             bmask = (self.label_map == hit_block["id"])[by:by+bh, bx:bx+bw]
-            f_sub = (self.face_mask[by:by+bh, bx:bx+bw] > 0) & bmask
+            f_sub = (self.face_bin[by:by+bh, bx:bx+bw] > 0) & bmask
             col_prof = f_sub.sum(axis=0).astype(np.float32)
             win_lo = max(8, rel_x - max(12, int(bw * 0.14)))
             win_hi = min(bw - 8, rel_x + max(12, int(bw * 0.14)))
@@ -1434,11 +1549,13 @@ class ImageClusterState:
         if not sorted_cids:
             return []
 
+        cluster_raw_masks = []
         cluster_cores = []
         cluster_bboxes = []
         for cid in sorted_cids:
             b_ids = cluster_blocks[cid]
             cmask = np.isin(self.label_map, b_ids).astype(np.uint8)
+            cluster_raw_masks.append(cmask)
             ys, xs = np.where(cmask > 0)
             if len(xs) > 0:
                 cluster_bboxes.append((int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())))
@@ -1446,20 +1563,28 @@ class ImageClusterState:
                 cluster_bboxes.append((0, 0, self.w, self.h))
 
             other_mask = (self.label_map > 0) & (~cmask.astype(bool))
-            closed = cv2.morphologyEx(cmask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (65, 9)))
+            closed = cv2.morphologyEx(cmask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (65, 19)))
             closed[other_mask] = 0
             cluster_cores.append(closed)
 
-        dists = [distance_transform_edt(1 - cm, sampling=(1.0, self.h_anisotropy)) for cm in cluster_cores]
+        dists = [distance_transform_edt(1 - cm, sampling=(1.0, max(0.65, self.h_anisotropy))) for cm in cluster_cores]
         dists_stack = np.stack(dists, axis=0)
         nearest_idx = np.argmin(dists_stack, axis=0)
 
         results = []
         for k, cid in enumerate(sorted_cids):
+            cmask = cluster_raw_masks[k]
+            other_mask = ((self.label_map > 0) & (~cmask.astype(bool))).astype(np.uint8)
             territory = ((nearest_idx == k) & (dists[k] <= self.outer_padding)).astype(np.uint8) * 255
             blur_k = max(11, int(round(self.smoothness * 7)) | 1)
             territory = cv2.GaussianBlur(territory, (blur_k, blur_k), 0)
             territory = (territory >= 128).astype(np.uint8) * 255
+
+            # Hard core protection: guarantee GaussianBlur never clips ('lẹm') own letter strokes or bleeds ('dư') into neighbor strokes
+            own_safe = cv2.dilate(cmask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+            other_safe = cv2.dilate(other_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+            territory[own_safe > 0] = 255
+            territory[other_safe > 0] = 0
 
             contours, _ = cv2.findContours(territory, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             paths = []
