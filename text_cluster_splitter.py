@@ -24,6 +24,7 @@ import base64
 import tempfile
 import unicodedata
 import subprocess
+import time
 import webbrowser
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -32,6 +33,9 @@ from urllib.parse import urlparse, parse_qs, unquote
 import cv2
 import numpy as np
 from scipy.ndimage import distance_transform_edt
+
+# Windows: hide the console window of every helper subprocess (AfterFX.exe -r, powershell, pip)
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
 
 def strip_accents(s: str) -> str:
@@ -124,13 +128,17 @@ def bring_app_to_front(app_name="Adobe After Effects"):
                 ae_app = ae_exe.split(".app")[0].split("/")[-1]
             subprocess.run(["osascript", "-e", f'tell application "{ae_app}" to activate'], capture_output=True)
         else:
-            cmd = f'powershell -Command "(New-Object -ComObject WScript.Shell).AppActivate(\'{app_name}\')"'
-            subprocess.run(cmd, shell=True, capture_output=True)
+            # Fire-and-forget: PowerShell cold start is ~0.5-1.5 s on Windows, never block the HTTP response on it
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+                 f"(New-Object -ComObject WScript.Shell).AppActivate('{app_name}')"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW
+            )
     except Exception:
         pass
 
 
-def run_ae_jsx(jsx_code: str) -> str:
+def run_ae_jsx(jsx_code: str, timeout: float = 8.0) -> str:
     """Executes ExtendScript in the running After Effects instance and returns output string."""
     out_file = Path(tempfile.gettempdir()) / "ae_splitter_out.json"
     if out_file.exists():
@@ -153,13 +161,26 @@ def run_ae_jsx(jsx_code: str) -> str:
     else:
         ae_exe = get_ae_path()
         if ae_exe:
-            subprocess.run([ae_exe, "-r", str(jsx_file)], capture_output=True, text=True)
+            # AfterFX.exe -r hands the script to the running AE instance and may return BEFORE it finishes
+            try:
+                subprocess.run([ae_exe, "-r", str(jsx_file)], capture_output=True, text=True,
+                               timeout=timeout, creationflags=_NO_WINDOW)
+            except subprocess.TimeoutExpired:
+                pass
 
-    if out_file.exists():
-        try:
-            return out_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            return ""
+    # Poll for the result file (Windows hand-off is asynchronous)
+    t_end = time.time() + timeout
+    while True:
+        if out_file.exists():
+            try:
+                txt = out_file.read_text(encoding="utf-8").strip()
+                if txt:
+                    return txt
+            except Exception:
+                pass
+        if sys.platform == "darwin" or time.time() > t_end:
+            break
+        time.sleep(0.05)
     return ""
 
 
@@ -2213,7 +2234,23 @@ class ImageClusterState:
             closed[other_mask] = 0
             cluster_cores.append(closed)
 
-        dists = [distance_transform_edt(1 - cm, sampling=(1.0, max(0.65, self.h_anisotropy))) for cm in cluster_cores]
+        # Anisotropic distance (horizontal flare priority) via OpenCV: squeeze X by `aniso`, run the fast exact
+        # cv2.distanceTransform, stretch back. ~6-10x faster than scipy EDT per cluster (big win on Windows CPUs).
+        aniso = max(0.65, float(self.h_anisotropy))
+        wh_, ww_ = work_lmap.shape[:2]
+        sw_ = max(1, int(round(ww_ * aniso)))
+        dists = []
+        for cm in cluster_cores:
+            if not np.any(cm):
+                dists.append(np.full((wh_, ww_), 1e9, dtype=np.float32))
+                continue
+            inv = (1 - cm).astype(np.uint8)
+            if sw_ != ww_:
+                inv_s = cv2.resize(inv, (sw_, wh_), interpolation=cv2.INTER_NEAREST)
+                d_s = cv2.distanceTransform(inv_s, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+                dists.append(cv2.resize(d_s, (ww_, wh_), interpolation=cv2.INTER_LINEAR))
+            else:
+                dists.append(cv2.distanceTransform(inv, cv2.DIST_L2, cv2.DIST_MASK_PRECISE))
         dists_stack = np.stack(dists, axis=0)
         nearest_idx = np.argmin(dists_stack, axis=0)
 
@@ -2661,16 +2698,54 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
     var siblingFiles = [];
     var isUpdatingDropdown = false;
 
+    // In-process HTTP GET over ExtendScript Socket: no curl / cmd.exe process spawn per click (system.callSystem
+    // costs ~150-400 ms + a console flash on Windows, and decodes output in the ANSI codepage which garbles Vietnamese).
+    function httpGet(pathQuery, timeoutSec) {{
+        var s = new Socket();
+        s.timeout = timeoutSec || 30;
+        s.encoding = "BINARY";
+        if (!s.open("127.0.0.1:" + PORT, "BINARY")) return null;
+        s.write("GET " + pathQuery + " HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n");
+        var raw = "";
+        while (s.connected && !s.eof) {{
+            var chunk = s.read(65536);
+            if (!chunk) break;
+            raw += chunk;
+        }}
+        s.close();
+        var sep = raw.indexOf("\\r\\n\\r\\n");
+        if (sep === -1) return null;
+        var body = raw.substring(sep + 4);
+        try {{ body = decodeURIComponent(escape(body)); }} catch (eDec) {{}}
+        return body;
+    }}
+
+    var serverAlive = false;
     function ensureServer() {{
-        var curlCmd = IS_MAC ? "curl" : "curl.exe";
-        var ping = system.callSystem(curlCmd + " -s -m 1 http://127.0.0.1:" + PORT + "/api/ping");
-        if (!ping || ping.indexOf("ok") === -1) {{
-            if (IS_MAC) {{
-                system.callSystem("'" + PY_EXE + "' '" + SCRIPT_PY + "' --port " + PORT + " --no-browser >/tmp/ae_splitter.log 2>&1 &");
-            }} else {{
-                system.callSystem('cmd.exe /c start /b "" "' + PY_EXE + '" "' + SCRIPT_PY + '" --port ' + PORT + ' --no-browser');
-            }}
-            $.sleep(1200);
+        if (serverAlive) return;
+        var ping = httpGet("/api/ping", 2);
+        if (ping && ping.indexOf("ok") !== -1) {{ serverAlive = true; return; }}
+        if (IS_MAC) {{
+            system.callSystem("'" + PY_EXE + "' '" + SCRIPT_PY + "' --port " + PORT + " --no-browser >/tmp/ae_splitter.log 2>&1 &");
+        }} else {{
+            // Launch detached through a .bat + File.execute(): system.callSystem('start /b ...') keeps the child's
+            // stdout pipe open and can freeze AE until the server exits. pythonw.exe = no console window.
+            var pyw = PY_EXE.replace(/python\\.exe$/i, "pythonw.exe");
+            if (!new File(pyw).exists) pyw = PY_EXE;
+            var bat = new File(Folder.temp.fsName + "/ae_splitter_start.bat");
+            bat.encoding = "UTF-8";
+            bat.lineFeed = "Windows";
+            bat.open("w");
+            bat.writeln("@echo off");
+            bat.writeln("chcp 65001 >nul");
+            bat.writeln('start "" "' + pyw.replace(/\\//g, "\\\\") + '" "' + SCRIPT_PY.replace(/\\//g, "\\\\") + '" --port ' + PORT + ' --no-browser');
+            bat.close();
+            bat.execute();
+        }}
+        for (var w = 0; w < 25; w++) {{
+            $.sleep(400);
+            ping = httpGet("/api/ping", 2);
+            if (ping && ping.indexOf("ok") !== -1) {{ serverAlive = true; return; }}
         }}
     }}
 
@@ -2684,9 +2759,13 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
 
     function callApi(endpoint, query) {{
         ensureServer();
-        var curlCmd = IS_MAC ? "curl" : "curl.exe";
-        var url = "http://127.0.0.1:" + PORT + endpoint + (query ? ("?" + query) : "");
-        var res = system.callSystem(curlCmd + ' -s "' + url + '"');
+        var pq = endpoint + (query ? ("?" + query) : "");
+        var res = httpGet(pq, 60);
+        if (res === null) {{
+            serverAlive = false;
+            ensureServer();
+            res = httpGet(pq, 60);
+        }}
         try {{
             return eval("(" + res + ")");
         }} catch (e) {{
@@ -4114,9 +4193,33 @@ def list_sibling_pngs(file_path: str) -> list:
     return sorted(set(files))
 
 
+_SUMMARY_CACHE = {"mask_key": None, "clusters": None, "dir_key": None, "files": None}
+
+
 def serialize_scriptui_summary() -> dict:
-    clusters = STATE.compute_cluster_masks()
+    # Cluster masks only change when the cluster assignment / mask params change: a plain selection click
+    # (1st click of a merge) reuses them, so only the cheap preview redraw runs.
+    mask_key = (
+        STATE.file_path, id(STATE.label_map),
+        tuple((b["id"], b["cluster_id"]) for b in STATE.blocks),
+        getattr(STATE, "outer_padding", None), getattr(STATE, "smoothness", None), getattr(STATE, "h_anisotropy", None),
+        json.dumps(getattr(STATE, "custom_cluster_names", {}) or {}, sort_keys=True, ensure_ascii=False),
+    )
+    if _SUMMARY_CACHE["mask_key"] == mask_key and _SUMMARY_CACHE["clusters"] is not None:
+        clusters = _SUMMARY_CACHE["clusters"]
+    else:
+        clusters = STATE.compute_cluster_masks()
+        _SUMMARY_CACHE["mask_key"], _SUMMARY_CACHE["clusters"] = mask_key, clusters
     preview_path = STATE.render_scriptui_preview(clusters)
+    # Sibling file list: cache per folder + mtime (directory listing is slow on Windows / network drives)
+    try:
+        d = os.path.dirname(STATE.file_path or "")
+        dir_key = (d, os.path.getmtime(d)) if d else None
+    except Exception:
+        dir_key = None
+    if dir_key is None or dir_key != _SUMMARY_CACHE["dir_key"]:
+        _SUMMARY_CACHE["files"] = list_sibling_pngs(STATE.file_path)
+        _SUMMARY_CACHE["dir_key"] = dir_key
     sel_txt = ""
     if STATE.selected_block_id is not None:
         sb = next((b for b in STATE.blocks if b["id"] == STATE.selected_block_id), None)
@@ -4127,7 +4230,7 @@ def serialize_scriptui_summary() -> dict:
         "filePath": STATE.file_path,
         "layerName": STATE.layer_name,
         "sourceName": STATE.source_name,
-        "files": list_sibling_pngs(STATE.file_path),
+        "files": _SUMMARY_CACHE["files"],
         "previewPath": preview_path,
         "blockCount": len(STATE.blocks),
         "clusterCount": len(clusters),
@@ -4378,6 +4481,18 @@ def install_ae_plugins(port: int = 8765):
     else:
         cep_dir = Path(os.environ.get("APPDATA", "")) / "Adobe" / "CEP" / "extensions" / "com.manh.textclustersplitter"
 
+    # Unsigned CEP extensions only load with PlayerDebugMode=1 (CSXS 9-12 cover AE 2019-2026)
+    for csxs_v in range(9, 13):
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["defaults", "write", f"com.adobe.CSXS.{csxs_v}", "PlayerDebugMode", "1"], capture_output=True)
+            elif sys.platform == "win32":
+                import winreg
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Adobe\CSXS.{csxs_v}") as k:
+                    winreg.SetValueEx(k, "PlayerDebugMode", 0, winreg.REG_SZ, "1")
+        except Exception:
+            pass
+
     try:
         (cep_dir / "CSXS").mkdir(parents=True, exist_ok=True)
         manifest_xml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -4461,6 +4576,7 @@ async function boot() {{
       const cp = req("child_process");
       const child = cp.spawn("{py_exe}", ["{script_py}", "--port", "{port}", "--no-browser"], {{
         detached: true,
+        windowsHide: true,
         stdio: "ignore"
       }});
       child.unref();

@@ -11,16 +11,54 @@
     var siblingFiles = [];
     var isUpdatingDropdown = false;
 
+    // In-process HTTP GET over ExtendScript Socket: no curl / cmd.exe process spawn per click (system.callSystem
+    // costs ~150-400 ms + a console flash on Windows, and decodes output in the ANSI codepage which garbles Vietnamese).
+    function httpGet(pathQuery, timeoutSec) {
+        var s = new Socket();
+        s.timeout = timeoutSec || 30;
+        s.encoding = "BINARY";
+        if (!s.open("127.0.0.1:" + PORT, "BINARY")) return null;
+        s.write("GET " + pathQuery + " HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        var raw = "";
+        while (s.connected && !s.eof) {
+            var chunk = s.read(65536);
+            if (!chunk) break;
+            raw += chunk;
+        }
+        s.close();
+        var sep = raw.indexOf("\r\n\r\n");
+        if (sep === -1) return null;
+        var body = raw.substring(sep + 4);
+        try { body = decodeURIComponent(escape(body)); } catch (eDec) {}
+        return body;
+    }
+
+    var serverAlive = false;
     function ensureServer() {
-        var curlCmd = IS_MAC ? "curl" : "curl.exe";
-        var ping = system.callSystem(curlCmd + " -s -m 1 http://127.0.0.1:" + PORT + "/api/ping");
-        if (!ping || ping.indexOf("ok") === -1) {
-            if (IS_MAC) {
-                system.callSystem("'" + PY_EXE + "' '" + SCRIPT_PY + "' --port " + PORT + " --no-browser >/tmp/ae_splitter.log 2>&1 &");
-            } else {
-                system.callSystem('cmd.exe /c start /b "" "' + PY_EXE + '" "' + SCRIPT_PY + '" --port ' + PORT + ' --no-browser');
-            }
-            $.sleep(1200);
+        if (serverAlive) return;
+        var ping = httpGet("/api/ping", 2);
+        if (ping && ping.indexOf("ok") !== -1) { serverAlive = true; return; }
+        if (IS_MAC) {
+            system.callSystem("'" + PY_EXE + "' '" + SCRIPT_PY + "' --port " + PORT + " --no-browser >/tmp/ae_splitter.log 2>&1 &");
+        } else {
+            // Launch detached through a .bat + File.execute(): system.callSystem('start /b ...') keeps the child's
+            // stdout pipe open and can freeze AE until the server exits. pythonw.exe = no console window.
+            var pyw = PY_EXE.replace(/python\.exe$/i, "pythonw.exe");
+            if (!new File(pyw).exists) pyw = PY_EXE;
+            var bat = new File(Folder.temp.fsName + "/ae_splitter_start.bat");
+            bat.encoding = "UTF-8";
+            bat.lineFeed = "Windows";
+            bat.open("w");
+            bat.writeln("@echo off");
+            bat.writeln("chcp 65001 >nul");
+            bat.writeln('start "" "' + pyw.replace(/\//g, "\\") + '" "' + SCRIPT_PY.replace(/\//g, "\\") + '" --port ' + PORT + ' --no-browser');
+            bat.close();
+            bat.execute();
+        }
+        for (var w = 0; w < 25; w++) {
+            $.sleep(400);
+            ping = httpGet("/api/ping", 2);
+            if (ping && ping.indexOf("ok") !== -1) { serverAlive = true; return; }
         }
     }
 
@@ -34,9 +72,13 @@
 
     function callApi(endpoint, query) {
         ensureServer();
-        var curlCmd = IS_MAC ? "curl" : "curl.exe";
-        var url = "http://127.0.0.1:" + PORT + endpoint + (query ? ("?" + query) : "");
-        var res = system.callSystem(curlCmd + ' -s "' + url + '"');
+        var pq = endpoint + (query ? ("?" + query) : "");
+        var res = httpGet(pq, 60);
+        if (res === null) {
+            serverAlive = false;
+            ensureServer();
+            res = httpGet(pq, 60);
+        }
         try {
             return eval("(" + res + ")");
         } catch (e) {
