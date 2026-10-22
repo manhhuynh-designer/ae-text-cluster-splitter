@@ -1230,6 +1230,7 @@ class ImageClusterState:
         else:
             is_flat_mono = False
 
+        speed_bar_mask = np.zeros((self.h, self.w), dtype=np.uint8)
         if is_flat_mono:
             face_bin = (a >= 128).astype(np.uint8)
             norm_gray = (255 - a).astype(np.uint8)
@@ -1256,10 +1257,13 @@ class ImageClusterState:
                 xc, yc, wc, hc, ac = sf_cln[i_c]
                 sol_c = ac / float(max(1, wc * hc))
                 if (
+                    ac < 25 or
                     (wc / float(max(1, hc)) >= 4.0 and hc <= max(28, int(self.h * 0.032))) or
                     (hc <= max(12, int(self.h * 0.014)) and wc / float(max(1, hc)) >= 2.2) or
                     (sol_c < 0.21 and ac < 3500 and max(wc, hc) >= 28)
                 ):
+                    if wc >= 100 and hc >= 12 and ac >= 1400 and sol_c >= 0.72 and wc / float(max(1, hc)) >= 4.0:
+                        speed_bar_mask[lf_cln == i_c] = 1
                     face_bin[lf_cln == i_c] = 0
                     norm_gray[lf_cln == i_c] = 255
 
@@ -1267,6 +1271,23 @@ class ImageClusterState:
         self.face_bin = face_bin.copy()
 
         icon_seeds = []
+        if np.any(speed_bar_mask):
+            sb_grp = cv2.dilate(speed_bar_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35)))
+            nsb, lsb, ssb, csb = cv2.connectedComponentsWithStats(sb_grp)
+            for isb in range(1, nsb):
+                m_sb = (lsb == isb) & (speed_bar_mask > 0)
+                ys_sb, xs_sb = np.where(m_sb)
+                if len(xs_sb) == 0:
+                    continue
+                bx0, by0 = int(xs_sb.min()), int(ys_sb.min())
+                bw0, bh0 = int(xs_sb.max() - bx0 + 1), int(ys_sb.max() - by0 + 1)
+                icon_seeds.append({
+                    "mask": m_sb,
+                    "x": bx0, "y": by0, "w": bw0, "h": bh0,
+                    "body_y": by0, "body_h": bh0, "body_cy": float(ys_sb.mean()),
+                    "cx": float(xs_sb.mean()), "cy": float(ys_sb.mean()),
+                    "text": "✨", "is_icon": True
+                })
         # 3A. Pre-filter 4-pointed star icons directly on undilated face_bin so stars close to text never fuse during w_bin dilation
         if not is_flat_mono:
             nf0, lf0, sf0, cf0 = cv2.connectedComponentsWithStats(face_bin)
@@ -2235,7 +2256,7 @@ class ImageClusterState:
 
         return results
 
-    def render_scriptui_preview(self, clusters: list = None, box_w: int = 520, box_h: int = 340) -> str:
+    def render_scriptui_preview(self, clusters: list = None, box_w: int = 480, box_h: int = 210) -> str:
         """Renders a crisp visual preview PNG fitted inside (box_w, box_h) with full Vietnamese Unicode labels."""
         if self.img_bgra is None:
             return ""
@@ -2754,13 +2775,13 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         win.orientation = "column";
         win.alignChildren = ["fill", "fill"];
         win.spacing = 2;
-        win.margins = 6;
+        win.margins = 4;
 
         // Scrollable Viewport Row (Content + Vertical Scrollbar)
         var mainArea = win.add("group");
         mainArea.orientation = "row";
         mainArea.alignment = ["fill", "fill"];
-        mainArea.alignChildren = ["fill", "fill"];
+        mainArea.alignChildren = ["fill", "top"];
         mainArea.spacing = 4;
         mainArea.margins = 0;
 
@@ -2773,67 +2794,68 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         var contentGrp = viewport.add("group");
         contentGrp.orientation = "column";
         contentGrp.alignChildren = ["fill", "top"];
-        contentGrp.spacing = 5;
+        contentGrp.spacing = 4;
         contentGrp.margins = 2;
 
-        var vScroll = mainArea.add("scrollbar", undefined, 0, 0, 100);
+        var vScroll = mainArea.add("scrollbar", undefined, 0, 0, 240);
         vScroll.alignment = ["right", "fill"];
-        vScroll.preferredSize = [14, -1];
-
-        var hScroll = win.add("scrollbar", undefined, 0, 0, 100);
-        hScroll.alignment = ["fill", "bottom"];
-        hScroll.preferredSize = [-1, 14];
+        vScroll.preferredSize = [15, 360];
+        vScroll.stepdelta = 25;
+        vScroll.jumpdelta = 75;
 
         // Tier 1A: Source Layer & File Selector
         var selRow = contentGrp.add("group");
         selRow.orientation = "row";
         selRow.alignChildren = ["left", "center"];
-        selRow.spacing = 6;
+        selRow.spacing = 5;
 
         var btnFetch = selRow.add("button", undefined, "🔄 Lấy Layer AE");
-        btnFetch.preferredSize.width = 135;
+        btnFetch.preferredSize = [125, 25];
         var ddFiles = selRow.add("dropdownlist", undefined, ["(Chọn nhanh file ảnh...)"]);
-        ddFiles.preferredSize.width = 375;
+        ddFiles.preferredSize = [355, 25];
 
         // Tier 1B: 1-Click Presets + Undo
         var presetRow = contentGrp.add("group");
         presetRow.orientation = "row";
         presetRow.alignChildren = ["fill", "center"];
-        presetRow.spacing = 5;
+        presetRow.spacing = 4;
 
         var btnLines = presetRow.add("button", undefined, "📑 Theo Dòng");
+        btnLines.preferredSize.height = 25;
         var btnWords = presetRow.add("button", undefined, "🔤 Từng Từ");
+        btnWords.preferredSize.height = 25;
         var btnIcons = presetRow.add("button", undefined, "✨ Tách Icon");
+        btnIcons.preferredSize.height = 25;
         var btnUndo = presetRow.add("button", undefined, "↩️ Undo");
-        btnUndo.preferredSize.width = 75;
+        btnUndo.preferredSize = [72, 25];
 
         // Tier 2: Direct-Manipulation Preview Canvas
         var imgGroup = contentGrp.add("panel", undefined, "Preview (Click 2 từ = Gộp cụm | Click lại/Shift = Tách riêng | Alt+Click = Cắt đôi):");
         imgGroup.orientation = "column";
         imgGroup.alignChildren = ["center", "center"];
-        imgGroup.margins = [6, 12, 6, 6];
+        imgGroup.margins = [4, 10, 4, 4];
 
         var previewImg = imgGroup.add("image", undefined);
-        previewImg.preferredSize = [520, 340];
+        previewImg.preferredSize = [480, 210];
 
         // Tier 3: 1-Line Editable Layer Names
         var nameRow = contentGrp.add("group");
         nameRow.orientation = "row";
         nameRow.alignChildren = ["left", "center"];
-        nameRow.spacing = 6;
+        nameRow.spacing = 5;
 
         var lblName = nameRow.add("statictext", undefined, "Tên Layer:");
-        lblName.preferredSize.width = 62;
+        lblName.preferredSize.width = 60;
         var txtNames = nameRow.add("edittext", undefined, "");
-        txtNames.preferredSize.width = 450;
+        txtNames.preferredSize = [420, 24];
         txtNames.helpTip = "Tên các Layer sẽ tạo trong AE (ngăn cách bởi dấu |). Bạn có thể sửa trực tiếp tại đây!";
 
         // Collapsible Advanced Settings (hidden by default to keep UI ultra-clean)
         var paramPanel = contentGrp.add("panel", undefined, "Thông số nâng cao (Mask & Anchor Point):");
         paramPanel.orientation = "column";
         paramPanel.alignChildren = ["fill", "top"];
-        paramPanel.spacing = 4;
-        paramPanel.margins = [10, 12, 10, 6];
+        paramPanel.spacing = 3;
+        paramPanel.margins = [8, 10, 8, 5];
         paramPanel.visible = false;
         paramPanel.maximumSize.height = 0;
 
@@ -2841,7 +2863,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         padRow.orientation = "row";
         padRow.add("statictext", undefined, "Độ rộng Glow (Padding):");
         var sldPad = padRow.add("slider", undefined, 85, 25, 180);
-        sldPad.preferredSize.width = 220;
+        sldPad.preferredSize.width = 200;
         var lblPad = padRow.add("statictext", undefined, "85 px");
         lblPad.characters = 6;
 
@@ -2849,7 +2871,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         fthRow.orientation = "row";
         fthRow.add("statictext", undefined, "Mask Feather (AE):        ");
         var sldFth = fthRow.add("slider", undefined, 5, 0, 25);
-        sldFth.preferredSize.width = 220;
+        sldFth.preferredSize.width = 200;
         var lblFth = fthRow.add("statictext", undefined, "5 px");
         lblFth.characters = 6;
 
@@ -2860,54 +2882,38 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         var botRow = contentGrp.add("group");
         botRow.orientation = "row";
         botRow.alignChildren = ["fill", "center"];
-        botRow.spacing = 6;
+        botRow.spacing = 5;
 
         var btnPush = botRow.add("button", undefined, "🚀 TÁCH LAYER VÀO AE");
-        btnPush.preferredSize.width = 390;
-        btnPush.preferredSize.height = 34;
+        btnPush.preferredSize = [370, 30];
 
         var btnGear = botRow.add("button", undefined, "⚙️");
-        btnGear.preferredSize.width = 48;
-        btnGear.preferredSize.height = 34;
+        btnGear.preferredSize = [46, 30];
         btnGear.helpTip = "Ẩn/Hiện thông số nâng cao (Padding, Feather, Anchor Point)";
 
         var btnWeb = botRow.add("button", undefined, "🌐");
-        btnWeb.preferredSize.width = 48;
-        btnWeb.preferredSize.height = 34;
+        btnWeb.preferredSize = [46, 30];
         btnWeb.helpTip = "Mở giao diện Web đầy đủ (Dao cắt tự do)";
 
         var statusTxt = contentGrp.add("statictext", undefined, "Sẵn sàng. Click chọn Layer trên AE để bắt đầu.");
-        statusTxt.characters = 74;
+        statusTxt.characters = 70;
+
+        function applyScrollOffset() {{
+            contentGrp.location = [2, 2 - Math.round(vScroll.value)];
+        }}
 
         function updateScroll() {{
-            if (!win.size || !contentGrp.size) return;
-            var viewW = Math.max(120, win.size[0] - 28);
-            var viewH = Math.max(120, win.size[1] - 28);
-            var contW = contentGrp.size[0] || 545;
-            var contH = contentGrp.size[1] || 520;
-            var maxX = Math.max(0, contW - viewW);
-            var maxY = Math.max(0, contH - viewH);
-            hScroll.maxvalue = maxX;
+            var contH = (contentGrp.size && contentGrp.size[1]) ? contentGrp.size[1] : (paramPanel.visible ? 520 : 395);
+            var winH = (win.size && win.size[1]) ? win.size[1] : 395;
+            var maxY = Math.max(220, contH - Math.max(150, winH - 16));
             vScroll.maxvalue = maxY;
-            hScroll.stepdelta = 25;
-            vScroll.stepdelta = 25;
-            hScroll.jumpdelta = 80;
-            vScroll.jumpdelta = 80;
-            hScroll.visible = (maxX > 4);
-            vScroll.visible = (maxY > 4);
-            if (hScroll.value > maxX) hScroll.value = maxX;
             if (vScroll.value > maxY) vScroll.value = maxY;
-            if (hScroll.value < 0) hScroll.value = 0;
             if (vScroll.value < 0) vScroll.value = 0;
-            contentGrp.location = [-Math.round(hScroll.value), -Math.round(vScroll.value)];
+            applyScrollOffset();
         }}
 
         vScroll.onChanging = vScroll.onChange = function() {{
-            contentGrp.location = [-Math.round(hScroll.value), -Math.round(this.value)];
-        }};
-
-        hScroll.onChanging = hScroll.onChange = function() {{
-            contentGrp.location = [-Math.round(this.value), -Math.round(vScroll.value)];
+            applyScrollOffset();
         }};
 
         win.onResizing = win.onResize = function() {{
@@ -2919,12 +2925,8 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             win.addEventListener("mousewheel", function(e) {{
                 var d = (e.detail || e.wheelDelta || 0);
                 var step = (d > 0) ? -28 : 28;
-                if (e.shiftKey && hScroll.visible) {{
-                    hScroll.value = Math.max(0, Math.min(hScroll.maxvalue, hScroll.value + step));
-                }} else if (vScroll.visible) {{
-                    vScroll.value = Math.max(0, Math.min(vScroll.maxvalue, vScroll.value + step));
-                }}
-                contentGrp.location = [-Math.round(hScroll.value), -Math.round(vScroll.value)];
+                vScroll.value = Math.max(0, Math.min(vScroll.maxvalue, vScroll.value + step));
+                applyScrollOffset();
             }});
         }} catch (eWheel) {{}}
 

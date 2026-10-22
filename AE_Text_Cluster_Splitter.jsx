@@ -145,13 +145,13 @@
         win.orientation = "column";
         win.alignChildren = ["fill", "fill"];
         win.spacing = 2;
-        win.margins = 6;
+        win.margins = 4;
 
         // Scrollable Viewport Row (Content + Vertical Scrollbar)
         var mainArea = win.add("group");
         mainArea.orientation = "row";
         mainArea.alignment = ["fill", "fill"];
-        mainArea.alignChildren = ["fill", "fill"];
+        mainArea.alignChildren = ["fill", "top"];
         mainArea.spacing = 4;
         mainArea.margins = 0;
 
@@ -164,67 +164,68 @@
         var contentGrp = viewport.add("group");
         contentGrp.orientation = "column";
         contentGrp.alignChildren = ["fill", "top"];
-        contentGrp.spacing = 5;
+        contentGrp.spacing = 4;
         contentGrp.margins = 2;
 
-        var vScroll = mainArea.add("scrollbar", undefined, 0, 0, 100);
+        var vScroll = mainArea.add("scrollbar", undefined, 0, 0, 240);
         vScroll.alignment = ["right", "fill"];
-        vScroll.preferredSize = [14, -1];
-
-        var hScroll = win.add("scrollbar", undefined, 0, 0, 100);
-        hScroll.alignment = ["fill", "bottom"];
-        hScroll.preferredSize = [-1, 14];
+        vScroll.preferredSize = [15, 360];
+        vScroll.stepdelta = 25;
+        vScroll.jumpdelta = 75;
 
         // Tier 1A: Source Layer & File Selector
         var selRow = contentGrp.add("group");
         selRow.orientation = "row";
         selRow.alignChildren = ["left", "center"];
-        selRow.spacing = 6;
+        selRow.spacing = 5;
 
         var btnFetch = selRow.add("button", undefined, "🔄 Lấy Layer AE");
-        btnFetch.preferredSize.width = 135;
+        btnFetch.preferredSize = [125, 25];
         var ddFiles = selRow.add("dropdownlist", undefined, ["(Chọn nhanh file ảnh...)"]);
-        ddFiles.preferredSize.width = 375;
+        ddFiles.preferredSize = [355, 25];
 
         // Tier 1B: 1-Click Presets + Undo
         var presetRow = contentGrp.add("group");
         presetRow.orientation = "row";
         presetRow.alignChildren = ["fill", "center"];
-        presetRow.spacing = 5;
+        presetRow.spacing = 4;
 
         var btnLines = presetRow.add("button", undefined, "📑 Theo Dòng");
+        btnLines.preferredSize.height = 25;
         var btnWords = presetRow.add("button", undefined, "🔤 Từng Từ");
+        btnWords.preferredSize.height = 25;
         var btnIcons = presetRow.add("button", undefined, "✨ Tách Icon");
+        btnIcons.preferredSize.height = 25;
         var btnUndo = presetRow.add("button", undefined, "↩️ Undo");
-        btnUndo.preferredSize.width = 75;
+        btnUndo.preferredSize = [72, 25];
 
         // Tier 2: Direct-Manipulation Preview Canvas
         var imgGroup = contentGrp.add("panel", undefined, "Preview (Click 2 từ = Gộp cụm | Click lại/Shift = Tách riêng | Alt+Click = Cắt đôi):");
         imgGroup.orientation = "column";
         imgGroup.alignChildren = ["center", "center"];
-        imgGroup.margins = [6, 12, 6, 6];
+        imgGroup.margins = [4, 10, 4, 4];
 
         var previewImg = imgGroup.add("image", undefined);
-        previewImg.preferredSize = [520, 340];
+        previewImg.preferredSize = [480, 210];
 
         // Tier 3: 1-Line Editable Layer Names
         var nameRow = contentGrp.add("group");
         nameRow.orientation = "row";
         nameRow.alignChildren = ["left", "center"];
-        nameRow.spacing = 6;
+        nameRow.spacing = 5;
 
         var lblName = nameRow.add("statictext", undefined, "Tên Layer:");
-        lblName.preferredSize.width = 62;
+        lblName.preferredSize.width = 60;
         var txtNames = nameRow.add("edittext", undefined, "");
-        txtNames.preferredSize.width = 450;
+        txtNames.preferredSize = [420, 24];
         txtNames.helpTip = "Tên các Layer sẽ tạo trong AE (ngăn cách bởi dấu |). Bạn có thể sửa trực tiếp tại đây!";
 
         // Collapsible Advanced Settings (hidden by default to keep UI ultra-clean)
         var paramPanel = contentGrp.add("panel", undefined, "Thông số nâng cao (Mask & Anchor Point):");
         paramPanel.orientation = "column";
         paramPanel.alignChildren = ["fill", "top"];
-        paramPanel.spacing = 4;
-        paramPanel.margins = [10, 12, 10, 6];
+        paramPanel.spacing = 3;
+        paramPanel.margins = [8, 10, 8, 5];
         paramPanel.visible = false;
         paramPanel.maximumSize.height = 0;
 
@@ -232,7 +233,7 @@
         padRow.orientation = "row";
         padRow.add("statictext", undefined, "Độ rộng Glow (Padding):");
         var sldPad = padRow.add("slider", undefined, 85, 25, 180);
-        sldPad.preferredSize.width = 220;
+        sldPad.preferredSize.width = 200;
         var lblPad = padRow.add("statictext", undefined, "85 px");
         lblPad.characters = 6;
 
@@ -240,7 +241,7 @@
         fthRow.orientation = "row";
         fthRow.add("statictext", undefined, "Mask Feather (AE):        ");
         var sldFth = fthRow.add("slider", undefined, 5, 0, 25);
-        sldFth.preferredSize.width = 220;
+        sldFth.preferredSize.width = 200;
         var lblFth = fthRow.add("statictext", undefined, "5 px");
         lblFth.characters = 6;
 
@@ -251,54 +252,38 @@
         var botRow = contentGrp.add("group");
         botRow.orientation = "row";
         botRow.alignChildren = ["fill", "center"];
-        botRow.spacing = 6;
+        botRow.spacing = 5;
 
         var btnPush = botRow.add("button", undefined, "🚀 TÁCH LAYER VÀO AE");
-        btnPush.preferredSize.width = 390;
-        btnPush.preferredSize.height = 34;
+        btnPush.preferredSize = [370, 30];
 
         var btnGear = botRow.add("button", undefined, "⚙️");
-        btnGear.preferredSize.width = 48;
-        btnGear.preferredSize.height = 34;
+        btnGear.preferredSize = [46, 30];
         btnGear.helpTip = "Ẩn/Hiện thông số nâng cao (Padding, Feather, Anchor Point)";
 
         var btnWeb = botRow.add("button", undefined, "🌐");
-        btnWeb.preferredSize.width = 48;
-        btnWeb.preferredSize.height = 34;
+        btnWeb.preferredSize = [46, 30];
         btnWeb.helpTip = "Mở giao diện Web đầy đủ (Dao cắt tự do)";
 
         var statusTxt = contentGrp.add("statictext", undefined, "Sẵn sàng. Click chọn Layer trên AE để bắt đầu.");
-        statusTxt.characters = 74;
+        statusTxt.characters = 70;
+
+        function applyScrollOffset() {
+            contentGrp.location = [2, 2 - Math.round(vScroll.value)];
+        }
 
         function updateScroll() {
-            if (!win.size || !contentGrp.size) return;
-            var viewW = Math.max(120, win.size[0] - 28);
-            var viewH = Math.max(120, win.size[1] - 28);
-            var contW = contentGrp.size[0] || 545;
-            var contH = contentGrp.size[1] || 520;
-            var maxX = Math.max(0, contW - viewW);
-            var maxY = Math.max(0, contH - viewH);
-            hScroll.maxvalue = maxX;
+            var contH = (contentGrp.size && contentGrp.size[1]) ? contentGrp.size[1] : (paramPanel.visible ? 520 : 395);
+            var winH = (win.size && win.size[1]) ? win.size[1] : 395;
+            var maxY = Math.max(220, contH - Math.max(150, winH - 16));
             vScroll.maxvalue = maxY;
-            hScroll.stepdelta = 25;
-            vScroll.stepdelta = 25;
-            hScroll.jumpdelta = 80;
-            vScroll.jumpdelta = 80;
-            hScroll.visible = (maxX > 4);
-            vScroll.visible = (maxY > 4);
-            if (hScroll.value > maxX) hScroll.value = maxX;
             if (vScroll.value > maxY) vScroll.value = maxY;
-            if (hScroll.value < 0) hScroll.value = 0;
             if (vScroll.value < 0) vScroll.value = 0;
-            contentGrp.location = [-Math.round(hScroll.value), -Math.round(vScroll.value)];
+            applyScrollOffset();
         }
 
         vScroll.onChanging = vScroll.onChange = function() {
-            contentGrp.location = [-Math.round(hScroll.value), -Math.round(this.value)];
-        };
-
-        hScroll.onChanging = hScroll.onChange = function() {
-            contentGrp.location = [-Math.round(this.value), -Math.round(vScroll.value)];
+            applyScrollOffset();
         };
 
         win.onResizing = win.onResize = function() {
@@ -310,12 +295,8 @@
             win.addEventListener("mousewheel", function(e) {
                 var d = (e.detail || e.wheelDelta || 0);
                 var step = (d > 0) ? -28 : 28;
-                if (e.shiftKey && hScroll.visible) {
-                    hScroll.value = Math.max(0, Math.min(hScroll.maxvalue, hScroll.value + step));
-                } else if (vScroll.visible) {
-                    vScroll.value = Math.max(0, Math.min(vScroll.maxvalue, vScroll.value + step));
-                }
-                contentGrp.location = [-Math.round(hScroll.value), -Math.round(vScroll.value)];
+                vScroll.value = Math.max(0, Math.min(vScroll.maxvalue, vScroll.value + step));
+                applyScrollOffset();
             });
         } catch (eWheel) {}
 
