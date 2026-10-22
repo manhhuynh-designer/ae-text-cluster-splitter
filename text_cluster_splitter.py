@@ -316,10 +316,18 @@ VN_WORD_FIXES = {
     "MỆ": "MẸ", "ME": "MẸ", "BIM": "BỈM", "BÌM": "BỈM",
     "CHONG": "CHÓNG", "CHỐNG": "CHÓNG", "KIP": "KỊP",
     "ĐÔ": "ĐỒ", "ĐỐ": "ĐỒ", "ĐỔ": "ĐỒ", "ĐỖ": "ĐỒ",
-    "VỚ": "VỚI", "GIẶI": "GIẶT", "NHẠNH": "NHANH",
+    "VỚ": "VỚI", "GIẶI": "GIẶT", "GIAT": "GIẶT", "NHẠNH": "NHANH",
     "AO": "ÁO", "ĐE": "ĐỂ", "ĐỀ": "ĐỂ", "CO": "CÓ",
-    "PHỐT": "PHÚT", "PHOT": "PHÚT", "PHUT": "PHÚT", "CUNG": "CÙNG",
+    "PHỐT": "PHÚT", "PHOT": "PHÚT", "PHUT": "PHÚT", "CUNG": "CỨNG",
     "ĐÀI": "DÀI", "TỐO": "TỐC", "TOO": "TỐC", "TOC": "TỐC",
+    "HOI": "HÔI", "MOC": "MỐC", "LAU": "LÂU", "SACH": "SẠCH",
+    "KHU": "KHỬ", "MUI": "MÙI", "VUOT": "VƯỢT", "TROI": "TRỘI",
+    "VET": "VẾT", "BAN": "BẨN", "BẦN": "BẨN", "DAU": "ĐẦU",
+    "BOT": "BỌT", "CUC": "CỰC", "LIÊN": "LIỀN",
+    "CHOP": "CHỚP", "NHOANG": "NHOÁNG", "NUOC": "NƯỚC",
+    "MANH": "MẠNH", "LAN": "LẦN", "XA": "XẢ", "DANH": "ĐÁNH",
+    "TUC": "TỨC", "THI": "THÌ", "CONG": "CÔNG", "NGHE": "NGHỆ",
+    "DOC": "ĐỘC", "QUYEN": "QUYỀN", "MOT": "MỘT", "MA": "MÀ", "VA": "VÀ",
 }
 
 VIETOCR_VOCAB_CHARS = (
@@ -428,6 +436,10 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
     s = re.sub(r"[:;]\s*[A-Z0-9]*$", "!", s)
     if "BIM" in strip_accents(s):
         s = re.sub(r"\s+\d+$", "?", s)
+    # Collapse repeated decorative tail characters (e.g. NHOANGGGGI -> NHOÁNG!)
+    s = re.sub(r"([A-ZÀ-Ỹ])\1{2,}[I1!]*$", r"\1!", s)
+    # Convert trailing digit 3/7 attached to a word at the end of a question line (e.g. XA3 -> XA?)
+    s = re.sub(r"([A-ZÀ-Ỹ]{2,})[37]$", r"\1?", s)
     s = re.sub(r"(\d+)([A-ZÀ-Ỹ]+)", r"\1 \2", s)
     s = re.sub(r"(OMO)([A-ZÀ-Ỹ]+)", r"\1 \2", s)
     s = re.sub(r"([A-ZÀ-Ỹ]+)(OMO)", r"\1 \2", s)
@@ -451,8 +463,11 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
                 seq = hint_words[i:i + n_join]
                 joined = "".join(strip_accents(w) for w in seq)
                 if joined == base:
-                    matched_multi = list(seq)
-                    matched_multi[-1] += punct
+                    if len(seq) == 1 and core_w != base and seq[0] == strip_accents(seq[0]):
+                        matched_multi = [core_w + punct]
+                    else:
+                        matched_multi = [VN_WORD_FIXES.get(w, w) for w in seq]
+                        matched_multi[-1] += punct
                     break
             if matched_multi:
                 break
@@ -465,10 +480,51 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
             base = strip_accents(core_w)
         for hw in hint_words:
             hw_base = strip_accents(hw)
-            if hw_base == base or (len(base) >= 3 and len(hw_base) == len(base) and sum(c1 != c2 for c1, c2 in zip(hw_base, base)) <= 1):
-                core_w = hw
+            if hw_base == base:
+                # Only overwrite core_w with hw if hw actually has accents (don't strip VietOCR's accents!)
+                if hw != hw_base:
+                    core_w = hw
                 break
+            elif len(base) >= 3 and len(hw_base) == len(base) and sum(c1 != c2 for c1, c2 in zip(hw_base, base)) <= 1:
+                core_w = VN_WORD_FIXES.get(hw, hw)
+                break
+        if core_w in VN_WORD_FIXES:
+            core_w = VN_WORD_FIXES[core_w]
         out_tokens.append(core_w + punct)
+
+    # Second pass: check if any 2 adjacent OCR tokens have a shifted boundary vs 2 consecutive hint words (e.g. "DỄH II" vs "DE HOI")
+    if len(out_tokens) >= 2 and len(hint_words) >= 2:
+        k = 0
+        while k < len(out_tokens) - 1:
+            t1, t2 = out_tokens[k], out_tokens[k + 1]
+            p2 = "".join(c for c in t2 if c in "!?.,")
+            b12 = strip_accents(re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", t1) + re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", t2))
+            replaced = False
+            for i in range(len(hint_words) - 1):
+                hw1, hw2 = hint_words[i], hint_words[i + 1]
+                hb12 = strip_accents(hw1) + strip_accents(hw2)
+                if len(b12) >= 4 and len(b12) == len(hb12) and sum(c1 != c2 for c1, c2 in zip(b12, hb12)) <= 1:
+                    out_tokens[k] = VN_WORD_FIXES.get(hw1, hw1)
+                    out_tokens[k + 1] = VN_WORD_FIXES.get(hw2, hw2) + p2
+                    replaced = True
+                    break
+            k += 2 if replaced else 1
+
+    # Third pass: contextual Vietnamese bigram disambiguation
+    bigram_fixes = {
+        ("CÙNG", "ĐẦU"): ("CỨNG", "ĐẦU"),
+        ("DE", "LÂU"): ("ĐỂ", "LÂU"),
+        ("DE", "HÔI"): ("DỄ", "HÔI"),
+        ("BỌT", "LẦN"): ("MỘT", "LẦN"),
+    }
+    for k in range(len(out_tokens) - 1):
+        w1 = re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", out_tokens[k])
+        w2 = re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", out_tokens[k + 1])
+        if (w1, w2) in bigram_fixes:
+            nw1, nw2 = bigram_fixes[(w1, w2)]
+            out_tokens[k] = out_tokens[k].replace(w1, nw1, 1)
+            out_tokens[k + 1] = out_tokens[k + 1].replace(w2, nw2, 1)
+
     return out_tokens
 
 
@@ -623,8 +679,13 @@ class ImageClusterState:
         self.h = 0
         self.w = 0
         self.alpha = None
+        self.face_bin = None
+        self.core_mask = None
         self.label_map = None
         self.blocks = []
+        self.selected_block_id = None
+        self.custom_cluster_names = {}
+        self.history = []
         self.preview_b64 = ""
         self.outer_padding = 85
         self.smoothness = 3.0
@@ -635,12 +696,39 @@ class ImageClusterState:
         self.preview_counter = 0
         self.preview_png_path = str(Path(tempfile.gettempdir()) / "ae_splitter_ui_preview_0.png")
 
+    def push_history(self):
+        if self.label_map is None:
+            return
+        snap = (
+            [dict(b, polys=list(b.get("polys", []))) for b in self.blocks],
+            self.label_map.copy(),
+            self.selected_block_id,
+            dict(self.custom_cluster_names)
+        )
+        self.history.append(snap)
+        if len(self.history) > 15:
+            self.history.pop(0)
+
+    def undo(self) -> bool:
+        if not self.history:
+            return False
+        blocks, lmap, sel_id, cnames = self.history.pop()
+        self.blocks = blocks
+        self.label_map = lmap
+        self.selected_block_id = sel_id
+        self.custom_cluster_names = cnames
+        return True
+
     def load_image(self, file_path: str, split_pinch: bool = True,
                    layer_name: str = "", source_name: str = "",
                    layer_w: int = 0, layer_h: int = 0):
         file_path = resolve_mac_path(file_path)
         if not file_path or not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
+
+        self.history = []
+        self.selected_block_id = None
+        self.custom_cluster_names = {}
 
         if file_path.lower().endswith(".psd"):
             img, b64_str, matched_src = extract_psd_layer_bgra(
@@ -691,6 +779,152 @@ class ImageClusterState:
 
         self._detect_blocks(split_pinch=split_pinch)
 
+    def _align_line_blobs_to_words(self, ln: list, words_li: list, face_bin: np.ndarray, core: np.ndarray) -> list:
+        """Aligns M horizontal character/word blobs in `ln` to K recognized OCR words `words_li`
+        using Dynamic Programming (for M > K) and Smooth Valley Profile Splitting (for M < K)."""
+        if not ln:
+            return []
+        ln.sort(key=lambda c: c["x"])
+        K = max(1, len(words_li))
+
+        # Case 1: More blobs than words (M > K) -> e.g. individual 3D letters grouped into K words via DP
+        if len(ln) > K:
+            M = len(ln)
+            if K == 1:
+                merged_mask = np.zeros_like(ln[0]["mask"])
+                for b in ln:
+                    merged_mask |= b["mask"]
+                ys, xs = np.where(merged_mask)
+                return [{
+                    "mask": merged_mask,
+                    "x": int(xs.min()), "y": int(ys.min()),
+                    "w": int(xs.max() - xs.min() + 1), "h": int(ys.max() - ys.min() + 1),
+                    "cx": float(xs.mean()), "cy": float(ys.mean()),
+                    "text": words_li[0], "is_icon": False
+                }]
+
+            gaps = [max(-10.0, float(ln[j + 1]["x"] - (ln[j]["x"] + ln[j]["w"]))) for j in range(M - 1)]
+            max_gap = max(max(gaps), 1.0)
+            blob_widths = [float(b["w"]) for b in ln]
+            tot_w = max(sum(blob_widths), 1.0)
+            char_lens = [max(1.0, float(len(re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", w)) or len(w))) for w in words_li]
+            tot_chars = max(sum(char_lens), 1.0)
+
+            INF = 1e9
+            dp = [[INF] * (M + 1) for _ in range(K + 1)]
+            parent_ptr = [[0] * (M + 1) for _ in range(K + 1)]
+            dp[0][0] = 0.0
+
+            for k in range(1, K + 1):
+                c_frac = char_lens[k - 1] / tot_chars
+                for m in range(k, M - (K - k) + 1):
+                    for prev_m in range(k - 1, m):
+                        grp_w_frac = sum(blob_widths[prev_m:m]) / tot_w
+                        grp_n_frac = float(m - prev_m) / float(M)
+                        gap_reward = (gaps[m - 1] / max_gap) if m < M else 0.0
+                        cost = (
+                            2.6 * abs(grp_w_frac - c_frac) +
+                            1.4 * abs(grp_n_frac - c_frac) -
+                            1.35 * gap_reward
+                        )
+                        cand = dp[k - 1][prev_m] + cost
+                        if cand < dp[k][m]:
+                            dp[k][m] = cand
+                            parent_ptr[k][m] = prev_m
+
+            groups = []
+            curr_m = M
+            for k in range(K, 0, -1):
+                prev_m = parent_ptr[k][curr_m]
+                groups.append((prev_m, curr_m, words_li[k - 1]))
+                curr_m = prev_m
+            groups.reverse()
+
+            merged_ln = []
+            for a_idx, b_idx, w_txt in groups:
+                sub_blobs = ln[a_idx:b_idx]
+                merged_mask = np.zeros_like(sub_blobs[0]["mask"])
+                for sb in sub_blobs:
+                    merged_mask |= sb["mask"]
+                ys, xs = np.where(merged_mask)
+                merged_ln.append({
+                    "mask": merged_mask,
+                    "x": int(xs.min()), "y": int(ys.min()),
+                    "w": int(xs.max() - xs.min() + 1), "h": int(ys.max() - ys.min() + 1),
+                    "cx": float(xs.mean()), "cy": float(ys.mean()),
+                    "text": w_txt, "is_icon": False
+                })
+            return merged_ln
+
+        # Case 2: Fewer blobs than words (M < K) -> Split wide fused 3D blocks at true inter-word valleys
+        if len(ln) < K:
+            counts = [1] * len(ln)
+            rem = K - len(ln)
+            while rem > 0:
+                best_j = max(range(len(ln)), key=lambda j: ln[j]["w"] / float(counts[j]))
+                counts[best_j] += 1
+                rem -= 1
+            new_ln = []
+            w_cursor = 0
+            for j, s in enumerate(ln):
+                cnt = counts[j]
+                sub_words = words_li[w_cursor:w_cursor + cnt]
+                w_cursor += cnt
+                if cnt == 1:
+                    s["text"] = sub_words[0]
+                    s["is_icon"] = False
+                    new_ln.append(s)
+                else:
+                    sx, sy, sw_box, sh_box = s["x"], s["y"], s["w"], s["h"]
+                    f_slice = (face_bin[sy:sy + sh_box, sx:sx + sw_box] > 0) & s["mask"][sy:sy + sh_box, sx:sx + sw_box]
+                    c_slice = (core[sy:sy + sh_box, sx:sx + sw_box] > 0) & s["mask"][sy:sy + sh_box, sx:sx + sw_box]
+                    col_face = np.sum(f_slice, axis=0).astype(np.float32)
+                    col_core = np.sum(c_slice, axis=0).astype(np.float32)
+                    profile = 0.78 * col_face + 0.22 * col_core
+                    if len(profile) >= 5:
+                        profile = np.convolve(profile, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+                    max_prof = max(float(profile.max()), 1.0)
+
+                    char_lens = [max(1, len(re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", w)) or len(w)) for w in sub_words]
+                    tot_chars = float(sum(char_lens))
+                    cuts = [0]
+                    cum = 0
+                    win_half = max(42, int(sw_box * 0.14))
+                    for r_i in range(cnt - 1):
+                        cum += char_lens[r_i]
+                        expected_x = int(sw_box * (cum / tot_chars))
+                        s_x1 = max(cuts[-1] + 24, expected_x - win_half)
+                        s_x2 = min(sw_box - 24, expected_x + win_half)
+                        if s_x2 > s_x1:
+                            xs_cand = np.arange(s_x1, s_x2)
+                            dist_pen = 0.22 * ((xs_cand - expected_x) / float(win_half)) ** 2
+                            score = (profile[s_x1:s_x2] / max_prof) + dist_pen
+                            cut_rel = s_x1 + int(np.argmin(score))
+                        else:
+                            cut_rel = expected_x
+                        cuts.append(cut_rel)
+                    cuts.append(sw_box)
+                    for r_i in range(cnt):
+                        c_x1, c_x2 = sx + cuts[r_i], sx + cuts[r_i + 1]
+                        sub_m = np.zeros_like(s["mask"])
+                        sub_m[sy:sy + sh_box, c_x1:c_x2] = s["mask"][sy:sy + sh_box, c_x1:c_x2]
+                        if not np.any(sub_m):
+                            sub_m[sy:sy + sh_box, c_x1:c_x2] = True
+                        ys_s, xs_s = np.where(sub_m)
+                        new_ln.append({
+                            "mask": sub_m,
+                            "x": c_x1, "y": sy, "w": max(1, c_x2 - c_x1), "h": sh_box,
+                            "cx": float(xs_s.mean()) if len(xs_s) else float(c_x1 + (c_x2 - c_x1) * 0.5),
+                            "cy": float(ys_s.mean()) if len(ys_s) else float(sy + sh_box * 0.5),
+                            "text": sub_words[r_i], "is_icon": False
+                        })
+            return new_ln
+
+        for j, s in enumerate(ln):
+            s["text"] = words_li[j]
+            s["is_icon"] = False
+        return ln
+
     def _detect_blocks(self, split_pinch: bool = True):
         from PIL import Image
         a = self.alpha
@@ -703,6 +937,7 @@ class ImageClusterState:
         # 1. Extract opaque core mask & distance transform
         core = (a >= thresh).astype(np.uint8)
         core = cv2.morphologyEx(core, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+        self.core_mask = core
         dist = cv2.distanceTransform(core, cv2.DIST_L2, 5)
 
         # 2. Spatially adaptive polarity normalization (extracts inner letter face regardless of white-on-blue or blue-on-white 3D style)
@@ -714,47 +949,100 @@ class ImageClusterState:
         face = np.where(local_inner_lum > 145.0, bright_face, dark_face) * inner_core
         norm_gray = (255.0 * (1.0 - face)).astype(np.uint8)
 
-        # 3. Detect word seeds and 4-pointed star icons on polarity-normalized letter faces
+        # 3. Detect character/word blobs, attach large 3D diacritics, and filter 4-pointed star icons
         face_bin = (norm_gray < 140).astype(np.uint8)
+        self.face_bin = face_bin
         w_bin = cv2.dilate(face_bin, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 5)))
         nw, lw, sw, cw = cv2.connectedComponentsWithStats(w_bin)
 
-        seeds = []
+        raw_blobs = []
         icon_seeds = []
-        min_seed_h = max(48, min(85, int(self.h * 0.14)))
-        min_seed_area = max(2500, min(7000, int(self.h * self.w * 0.012)))
         for i in range(1, nw):
             x, y, w, h, area = sw[i]
+            if area < 900:
+                continue
             f_area = int(np.sum((lw[y:y + h, x:x + w] == i) & (face_bin[y:y + h, x:x + w] > 0)))
             f_sol = f_area / float(max(1, w * h))
             if 1000 <= area < 14000 and w < 185 and h < 230 and f_sol <= 0.36 and 0.65 <= (w / float(max(1, h))) <= 1.32:
-                # Ensure it is not a letter (e.g. 'Y') sitting on the exact same baseline as an adjacent letter
-                on_letter_baseline = False
+                # Ensure it is not a letter (like 'Y', 'C', 'V') sitting on the exact same top & bottom baseline as adjacent letters
+                same_baseline_peers = 0
                 for j in range(1, nw):
                     if j == i:
                         continue
                     ox, oy, ow, oh, oarea = sw[j]
-                    if oh >= min_seed_h and oarea >= min_seed_area:
+                    if oh >= 55 and oarea >= 2600:
                         h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
-                        if h_gap < 25 and abs((y + h) - (oy + oh)) <= 12 and abs(y - oy) <= 35:
-                            on_letter_baseline = True
-                            break
-                if not on_letter_baseline:
+                        if abs(y - oy) <= 10 and abs((y + h) - (oy + oh)) <= 10 and h_gap <= 180:
+                            same_baseline_peers += 1
+                if same_baseline_peers == 0:
                     norm_gray[y:y + h, x:x + w][lw[y:y + h, x:x + w] == i] = 255
                     icon_seeds.append({
                         "mask": (lw == i),
                         "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                        "body_y": int(y), "body_h": int(h), "body_cy": float(cw[i][1]),
                         "cx": float(cw[i][0]), "cy": float(cw[i][1]),
                         "text": "✨", "is_icon": True
                     })
                     continue
-            if h >= min_seed_h and area >= min_seed_area:
-                seeds.append({
-                    "mask": (lw == i),
-                    "x": int(x), "y": int(y), "w": int(w), "h": int(h),
-                    "cx": float(cw[i][0]), "cy": float(cw[i][1]),
-                    "area": int(area)
-                })
+
+            raw_blobs.append({
+                "id": i,
+                "mask": (lw == i),
+                "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                "body_y": int(y), "body_h": int(h), "body_cy": float(cw[i][1]),
+                "cx": float(cw[i][0]), "cy": float(cw[i][1]),
+                "area": int(area), "f_sol": f_sol
+            })
+
+        # Select main word/character bodies: either standard word-seed size OR part of a >=3-letter collinear subtitle row
+        std_seed_h = max(48, min(85, int(self.h * 0.14)))
+        std_seed_area = max(2500, min(7000, int(self.h * self.w * 0.012)))
+        bodies = []
+        for b in raw_blobs:
+            if b["h"] >= std_seed_h and b["area"] >= std_seed_area:
+                bodies.append(b)
+            elif b["h"] >= 55 and b["area"] >= 2600:
+                collinear_peers = sum(
+                    1 for o in raw_blobs
+                    if o is not b and o["h"] >= 55 and o["area"] >= 2600
+                    and abs(b["y"] - o["y"]) <= 12 and abs(b["h"] - o["h"]) <= 16
+                )
+                if collinear_peers >= 3:
+                    bodies.append(b)
+
+        # Merge oversized diacritic hats (e.g. 'Ể', 'Ố' on giant 3D titles where parent body_h >= 200) into parent word
+        bodies.sort(key=lambda b: b["h"], reverse=True)
+        seeds = []
+        for b in bodies:
+            is_hat = False
+            has_row_peer = any(
+                o is not b and 0.72 <= (o["h"] / float(max(1, b["h"]))) <= 1.38
+                and abs(o["cy"] - b["cy"]) <= max(b["h"], o["h"]) * 0.45
+                for o in bodies
+            )
+            if not has_row_peer:
+                for parent in seeds:
+                    ov_x = max(0, min(b["x"] + b["w"], parent["x"] + parent["w"]) - max(b["x"], parent["x"]))
+                    v_gap_above = parent["body_y"] - (b["y"] + b["h"])
+                    if (
+                        parent["body_h"] >= 200 and
+                        b["h"] <= parent["body_h"] * 0.48 and
+                        b["w"] <= parent["body_h"] * 0.90 and
+                        b["area"] <= parent["area"] * 0.18 and
+                        ov_x >= b["w"] * 0.50 and
+                        -20 <= v_gap_above <= parent["body_h"] * 0.30
+                    ):
+                        parent["mask"] = parent["mask"] | b["mask"]
+                        nx1 = min(parent["x"], b["x"])
+                        ny1 = min(parent["y"], b["y"])
+                        nx2 = max(parent["x"] + parent["w"], b["x"] + b["w"])
+                        ny2 = max(parent["y"] + parent["h"], b["y"] + b["h"])
+                        parent["x"], parent["y"], parent["w"], parent["h"] = nx1, ny1, nx2 - nx1, ny2 - ny1
+                        parent["area"] += b["area"]
+                        is_hat = True
+                        break
+            if not is_hat:
+                seeds.append(b)
 
         # Also check raw core for any isolated 4-pointed star icons not caught in w_bin
         nc_raw, lc_raw, sc_raw, cc_raw = cv2.connectedComponentsWithStats(core)
@@ -762,12 +1050,11 @@ class ImageClusterState:
             x, y, w, h, area = sc_raw[i]
             sol = area / float(max(1, w * h))
             if 1000 <= area < 14000 and w < 185 and h < 230 and sol <= 0.54 and 0.65 <= (w / float(max(1, h))) <= 1.28:
-                # Exclude diacritics sitting directly above/below a word seed
                 is_diacritic = False
                 for sd in seeds:
                     ov_x = max(0, min(x + w, sd["x"] + sd["w"]) - max(x, sd["x"]))
                     v_gap = max(0, max(y - (sd["y"] + sd["h"]), sd["y"] - (y + h)))
-                    if ov_x >= w * 0.45 and v_gap < 40:
+                    if ov_x >= w * 0.45 and v_gap < 45:
                         is_diacritic = True
                         break
                 if is_diacritic:
@@ -778,24 +1065,32 @@ class ImageClusterState:
                     icon_seeds.append({
                         "mask": m_raw,
                         "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                        "body_y": int(y), "body_h": int(h), "body_cy": float(cc_raw[i][1]),
                         "cx": float(cc_raw[i][0]), "cy": float(cc_raw[i][1]),
                         "text": "✨", "is_icon": True
                     })
 
-        # 4. Group word seeds into horizontal text lines (top-to-bottom)
-        seeds.sort(key=lambda s: s["cy"])
+        # 4. Group word seeds into horizontal/slanted text lines using body_cy & nearest horizontal neighbor
+        seeds.sort(key=lambda s: s["body_cy"])
         lines = []
         for s in seeds:
             placed = False
             for ln in lines:
-                if abs(s["cy"] - np.mean([x["cy"] for x in ln])) < max(np.mean([x["h"] for x in ln]), 110) * 0.60:
+                nearest_in_ln = min(ln, key=lambda item: abs(s["cx"] - item["cx"]))
+                ref_h = max(np.mean([x["body_h"] for x in ln]), s["body_h"], 90.0)
+                if (
+                    abs(s["body_cy"] - nearest_in_ln["body_cy"]) < ref_h * 0.58 or
+                    abs(s["body_cy"] - np.mean([x["body_cy"] for x in ln])) < ref_h * 0.52
+                ):
                     ln.append(s)
                     placed = True
                     break
             if not placed:
                 lines.append([s])
 
-        # 5. Run cross-platform VietOCR on line crops & align 1-to-1 with word seeds
+        lines.sort(key=lambda ln: np.mean([x["body_cy"] for x in ln]))
+
+        # 5. Run cross-platform VietOCR on line crops & align with word seeds via DP / Valley Profile
         fname = unicodedata.normalize("NFC", os.path.basename(self.file_path or ""))
         fname_clean = re.split(r"-\s*\d|\d{4,}", os.path.splitext(fname)[0])[0]
         hint_words = [w.upper() for w in re.findall(r"[A-Za-zÀ-ỹ0-9]+", fname_clean)]
@@ -804,9 +1099,9 @@ class ImageClusterState:
         for ln in lines:
             ln.sort(key=lambda c: c["x"])
             x1 = max(0, min(c["x"] for c in ln) - 15)
-            y1 = max(0, min(c["y"] for c in ln) - 55)
+            y1 = max(0, min(c["body_y"] for c in ln) - 55)
             x2 = min(self.w, max(c["x"] + c["w"] for c in ln) + 15)
-            y2 = min(self.h, max(c["y"] + c["h"] for c in ln) + 28)
+            y2 = min(self.h, max(c["body_y"] + c["body_h"] for c in ln) + 28)
             crop = cv2.cvtColor(norm_gray[y1:y2, x1:x2], cv2.COLOR_GRAY2RGB)
             line_crops.append(Image.fromarray(crop))
 
@@ -824,83 +1119,8 @@ class ImageClusterState:
         ordered_lines = []
         for li, ln in enumerate(lines):
             words_li = cleaned_lines[li] if (li < len(cleaned_lines) and cleaned_lines[li]) else [f"Chữ {j + 1}" for j in range(len(ln))]
-            K = max(1, len(words_li))
-
-            # Merge closest adjacent seeds if len(ln) > K
-            while len(ln) > K:
-                best_idx, min_gap = 0, 999999
-                for j in range(len(ln) - 1):
-                    gap = ln[j + 1]["x"] - (ln[j]["x"] + ln[j]["w"])
-                    if gap < min_gap:
-                        min_gap, best_idx = gap, j
-                s1, s2 = ln[best_idx], ln[best_idx + 1]
-                merged_mask = s1["mask"] | s2["mask"]
-                ys, xs = np.where(merged_mask)
-                ln[best_idx] = {
-                    "mask": merged_mask,
-                    "x": int(xs.min()), "y": int(ys.min()),
-                    "w": int(xs.max() - xs.min() + 1), "h": int(ys.max() - ys.min() + 1),
-                    "cx": float(xs.mean()), "cy": float(ys.mean())
-                }
-                ln.pop(best_idx + 1)
-
-            # Split widest seeds at deepest face_bin valley if len(ln) < K
-            if len(ln) < K and len(ln) > 0:
-                counts = [1] * len(ln)
-                rem = K - len(ln)
-                while rem > 0:
-                    best_j = max(range(len(ln)), key=lambda j: ln[j]["w"] / float(counts[j]))
-                    counts[best_j] += 1
-                    rem -= 1
-                new_ln = []
-                w_cursor = 0
-                for j, s in enumerate(ln):
-                    cnt = counts[j]
-                    sub_words = words_li[w_cursor:w_cursor + cnt]
-                    w_cursor += cnt
-                    if cnt == 1:
-                        s["text"] = sub_words[0]
-                        s["is_icon"] = False
-                        new_ln.append(s)
-                    else:
-                        sx, sy, sw_box, sh_box = s["x"], s["y"], s["w"], s["h"]
-                        col_sum = np.sum(face_bin[sy:sy + sh_box, sx:sx + sw_box] & s["mask"][sy:sy + sh_box, sx:sx + sw_box], axis=0)
-                        char_lens = [max(1, len(w)) for w in sub_words]
-                        tot_chars = float(sum(char_lens))
-                        cuts = [0]
-                        cum = 0
-                        for r_i in range(cnt - 1):
-                            cum += char_lens[r_i]
-                            expected_x = int(sw_box * (cum / tot_chars))
-                            s_x1 = max(cuts[-1] + 20, expected_x - 38)
-                            s_x2 = min(sw_box - 20, expected_x + 38)
-                            if s_x2 > s_x1:
-                                cut_rel = s_x1 + int(np.argmin(col_sum[s_x1:s_x2]))
-                            else:
-                                cut_rel = expected_x
-                            cuts.append(cut_rel)
-                        cuts.append(sw_box)
-                        for r_i in range(cnt):
-                            c_x1, c_x2 = sx + cuts[r_i], sx + cuts[r_i + 1]
-                            sub_m = np.zeros_like(s["mask"])
-                            sub_m[sy:sy + sh_box, c_x1:c_x2] = s["mask"][sy:sy + sh_box, c_x1:c_x2]
-                            if not np.any(sub_m):
-                                sub_m[sy:sy + sh_box, c_x1:c_x2] = True
-                            ys_s, xs_s = np.where(sub_m)
-                            new_ln.append({
-                                "mask": sub_m,
-                                "x": c_x1, "y": sy, "w": max(1, c_x2 - c_x1), "h": sh_box,
-                                "cx": float(xs_s.mean()) if len(xs_s) else float(c_x1 + (c_x2 - c_x1) * 0.5),
-                                "cy": float(ys_s.mean()) if len(ys_s) else float(sy + sh_box * 0.5),
-                                "text": sub_words[r_i], "is_icon": False
-                            })
-                ln = new_ln
-            else:
-                for j, s in enumerate(ln):
-                    s["text"] = words_li[j]
-                    s["is_icon"] = False
-
-            ordered_lines.append(ln)
+            aligned_ln = self._align_line_blobs_to_words(ln, words_li, face_bin, core)
+            ordered_lines.append(aligned_ln)
 
         # Attach icons to their nearest line
         if not ordered_lines and icon_seeds:
@@ -960,6 +1180,9 @@ class ImageClusterState:
             })
 
     def apply_preset_mode(self, mode: str):
+        self.push_history()
+        self.selected_block_id = None
+        self.custom_cluster_names = {}
         if mode == "lines":
             for b in self.blocks:
                 b["cluster_id"] = b["line_index"] + 1
@@ -975,11 +1198,20 @@ class ImageClusterState:
     def normalize_cluster_ids(self):
         used = sorted(set(b["cluster_id"] for b in self.blocks))
         cmap = {cid: i + 1 for i, cid in enumerate(used)}
+        if self.custom_cluster_names:
+            new_custom = {}
+            for old_cid, new_cid in cmap.items():
+                if str(old_cid) in self.custom_cluster_names:
+                    new_custom[str(new_cid)] = self.custom_cluster_names[str(old_cid)]
+            self.custom_cluster_names = new_custom
         for b in self.blocks:
             b["cluster_id"] = cmap[b["cluster_id"]]
 
     def get_cluster_auto_name(self, cid: int, fallback_index: int) -> str:
         """Generates a clean layer name from the recognized words of all blocks in cluster `cid`."""
+        custom_nm = (self.custom_cluster_names or {}).get(str(cid), "").strip()
+        if custom_nm:
+            return custom_nm
         c_blocks = [b for b in self.blocks if b["cluster_id"] == cid]
         if not c_blocks:
             return f"Cụm {fallback_index}"
@@ -993,9 +1225,112 @@ class ImageClusterState:
             return "✨ Icon"
         return f"Cụm {fallback_index}"
 
+    def set_cluster_names_from_pipe_str(self, pipe_str: str):
+        """Parses a pipe-separated string ('LƯU HƯƠNG | CỰC ĐỈNH') into custom cluster names."""
+        if not pipe_str or not pipe_str.strip():
+            return
+        parts = [p.strip() for p in pipe_str.split("|") if p.strip()]
+        used_cids = sorted(set(b["cluster_id"] for b in self.blocks if b["cluster_id"] > 0))
+        for idx, cid in enumerate(used_cids):
+            if idx < len(parts):
+                auto_default = self.get_cluster_auto_name(cid, idx + 1)
+                if parts[idx] != auto_default:
+                    self.custom_cluster_names[str(cid)] = parts[idx]
+
+    def split_block_at_point(self, ix: float, iy: float) -> bool:
+        """Splits a fused word block at or near (ix, iy) along the local vertical valley."""
+        if self.label_map is None or not self.blocks:
+            return False
+        hit_block = None
+        for b in self.blocks:
+            if (b["x"] - 10) <= ix <= (b["x"] + b["w"] + 10) and (b["y"] - 10) <= iy <= (b["y"] + b["h"] + 10):
+                hit_block = b
+                break
+        if not hit_block:
+            return False
+
+        bx, by, bw, bh = hit_block["x"], hit_block["y"], hit_block["w"], hit_block["h"]
+        rel_x = int(round(ix - bx))
+        if bw > 36 and self.face_mask is not None:
+            bmask = (self.label_map == hit_block["id"])[by:by+bh, bx:bx+bw]
+            f_sub = (self.face_mask[by:by+bh, bx:bx+bw] > 0) & bmask
+            col_prof = f_sub.sum(axis=0).astype(np.float32)
+            win_lo = max(8, rel_x - max(12, int(bw * 0.14)))
+            win_hi = min(bw - 8, rel_x + max(12, int(bw * 0.14)))
+            if win_hi > win_lo:
+                best_rel = win_lo + int(np.argmin(col_prof[win_lo:win_hi]))
+                cut_x = bx + best_rel
+            else:
+                cut_x = int(round(ix))
+        else:
+            cut_x = int(round(ix))
+
+        self.split_block_by_line(cut_x, by - 10, cut_x, by + bh + 10)
+        # Assign the right-hand split part to a new cluster so the user immediately sees 2 clusters
+        right_candidates = [
+            b for b in self.blocks
+            if b["line_index"] == hit_block["line_index"] and abs(b["x"] - cut_x) <= 25
+        ]
+        if right_candidates:
+            max_cid = max((b["cluster_id"] for b in self.blocks), default=1)
+            right_candidates[0]["cluster_id"] = max_cid + 1
+            self.normalize_cluster_ids()
+        return True
+
+    def smart_click(self, ix: float, iy: float, alt_key: bool = False, shift_key: bool = False):
+        """
+        Direct-Manipulation Smart Click on Preview Canvas:
+        - Alt + Click on a block: Split the block vertically at the local valley around the click point.
+        - Shift + Click on a block (or click the already-selected block again): Isolate that block into a new cluster.
+        - Click Block A -> Click Block B: Merge Block B into Block A's cluster.
+        - Click empty background: Deselect active block.
+        """
+        if alt_key:
+            self.split_block_at_point(ix, iy)
+            self.selected_block_id = None
+            return
+
+        hit_block = None
+        for b in self.blocks:
+            if b["x"] <= ix <= b["x"] + b["w"] and b["y"] <= iy <= b["y"] + b["h"]:
+                hit_block = b
+                break
+
+        if not hit_block:
+            self.selected_block_id = None
+            return
+
+        if shift_key or (self.selected_block_id == hit_block["id"]):
+            # Isolate this block into its own cluster (if it shares its cluster with other blocks)
+            same_cluster = [b for b in self.blocks if b["cluster_id"] == hit_block["cluster_id"]]
+            if len(same_cluster) > 1:
+                self.push_history()
+                max_cid = max((b["cluster_id"] for b in self.blocks), default=1)
+                hit_block["cluster_id"] = max_cid + 1
+                self.custom_cluster_names = {}
+                self.normalize_cluster_ids()
+            self.selected_block_id = hit_block["id"]
+            return
+
+        if self.selected_block_id is not None:
+            anchor_block = next((b for b in self.blocks if b["id"] == self.selected_block_id), None)
+            if anchor_block and anchor_block["id"] != hit_block["id"]:
+                if hit_block["cluster_id"] != anchor_block["cluster_id"]:
+                    self.push_history()
+                    hit_block["cluster_id"] = anchor_block["cluster_id"]
+                    self.custom_cluster_names = {}
+                    self.normalize_cluster_ids()
+                # Keep anchor_block selected so the user can keep clicking words C, D to merge into the same cluster
+                return
+
+        # First click: select this block as the anchor
+        self.selected_block_id = hit_block["id"]
+
     def split_block_by_line(self, x1: float, y1: float, x2: float, y2: float):
         if self.label_map is None:
             return
+        self.push_history()
+        self.custom_cluster_names = {}
         cut_mask = np.zeros((self.h, self.w), dtype=np.uint8)
         cv2.line(cut_mask, (int(x1), int(y1)), (int(x2), int(y2)), 1, thickness=6)
 
@@ -1169,8 +1504,8 @@ class ImageClusterState:
 
         return results
 
-    def render_scriptui_preview(self, clusters: list = None, box_w: int = 520, box_h: int = 360) -> str:
-        """Renders a crisp visual preview PNG fitted inside (box_w, box_h) with aspect ratio preserved."""
+    def render_scriptui_preview(self, clusters: list = None, box_w: int = 520, box_h: int = 340) -> str:
+        """Renders a crisp visual preview PNG fitted inside (box_w, box_h) with full Vietnamese Unicode labels."""
         if self.img_bgra is None:
             return ""
         if clusters is None:
@@ -1181,19 +1516,6 @@ class ImageClusterState:
         bg[::32, :] = 24
         bg[:, ::32] = 24
         vis = (self.img_bgra[:, :, :3] * alpha_f + bg * (1.0 - alpha_f)).astype(np.uint8)
-
-        for b in self.blocks:
-            cid = b["cluster_id"]
-            col = BGR_PALETTE[(cid - 1) % len(BGR_PALETTE)]
-            bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
-            cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), col, 2, cv2.LINE_AA)
-            tag_y = max(24, by - 6)
-            ascii_txt = strip_accents(b.get("text", ""))[:10] or "ICON"
-            label_str = f"C{cid}:{ascii_txt}"
-            pill_w = max(56, len(label_str) * 11 + 12)
-            cv2.rectangle(vis, (bx, tag_y - 22), (bx + pill_w, tag_y + 2), col, -1)
-            cv2.putText(vis, label_str, (bx + 6, tag_y - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (15, 17, 23), 2, cv2.LINE_AA)
 
         for cm in clusters:
             cid = cm["cluster_id"]
@@ -1211,6 +1533,15 @@ class ImageClusterState:
                 cv2.line(vis, (ax - 15, ay), (ax + 15, ay), col, 2, cv2.LINE_AA)
                 cv2.line(vis, (ax, ay - 15), (ax, ay + 15), col, 2, cv2.LINE_AA)
 
+        for b in self.blocks:
+            cid = b["cluster_id"]
+            col = BGR_PALETTE[(cid - 1) % len(BGR_PALETTE)]
+            bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
+            is_sel = (self.selected_block_id == b["id"])
+            if is_sel:
+                cv2.rectangle(vis, (bx - 4, by - 4), (bx + bw + 4, by + bh + 4), (255, 255, 255), 4, cv2.LINE_AA)
+            cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), col, 3 if is_sel else 2, cv2.LINE_AA)
+
         scale = min(box_w / float(self.w), box_h / float(self.h))
         new_w = max(1, int(round(self.w * scale)))
         new_h = max(1, int(round(self.h * scale)))
@@ -1220,6 +1551,58 @@ class ImageClusterState:
         off_x = (box_w - new_w) // 2
         off_y = (box_h - new_h) // 2
         canvas_img[off_y:off_y + new_h, off_x:off_x + new_w] = resized
+
+        # Draw crisp Unicode Vietnamese tags AT SCREEN RESOLUTION so labels are always sharp regardless of image size
+        try:
+            from PIL import ImageDraw, ImageFont
+            pil_canvas = Image.fromarray(cv2.cvtColor(canvas_img, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(pil_canvas)
+            font_obj = None
+            for fp_font in (
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                "/System/Library/Fonts/Helvetica.ttc",
+                "C:/Windows/Fonts/segoeuib.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",
+            ):
+                if os.path.exists(fp_font):
+                    try:
+                        font_obj = ImageFont.truetype(fp_font, 11)
+                        break
+                    except Exception:
+                        pass
+            if font_obj is None:
+                font_obj = ImageFont.load_default()
+
+            for b in self.blocks:
+                cid = b["cluster_id"]
+                col_bgr = BGR_PALETTE[(cid - 1) % len(BGR_PALETTE)]
+                col_rgb = (col_bgr[2], col_bgr[1], col_bgr[0])
+                sx = int(round(off_x + b["x"] * scale))
+                sy = int(round(off_y + b["y"] * scale))
+                is_sel = (self.selected_block_id == b["id"])
+                txt_raw = (b.get("text") or "").strip() or "ICON"
+                if txt_raw == "✨":
+                    txt_raw = "ICON"
+                label_str = f"C{cid}: {txt_raw[:12]}"
+                try:
+                    tb = draw.textbbox((0, 0), label_str, font=font_obj)
+                    tw = tb[2] - tb[0]
+                    th = tb[3] - tb[1]
+                except Exception:
+                    tw = len(label_str) * 7
+                    th = 11
+                px1 = max(2, min(box_w - tw - 10, sx))
+                py1 = max(2, sy - th - 7)
+                px2 = px1 + tw + 8
+                py2 = py1 + th + 5
+                if is_sel:
+                    draw.rectangle([px1 - 2, py1 - 2, px2 + 2, py2 + 2], fill=(255, 255, 255))
+                draw.rectangle([px1, py1, px2, py2], fill=col_rgb)
+                draw.text((px1 + 4, py1 + 2), label_str, fill=(12, 14, 20), font=font_obj)
+
+            canvas_img = cv2.cvtColor(np.array(pil_canvas), cv2.COLOR_RGB2BGR)
+        except Exception:
+            pass
 
         self.preview_scale = scale
         self.preview_off_x = off_x
@@ -1639,56 +2022,61 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
 
         win.orientation = "column";
         win.alignChildren = ["fill", "top"];
-        win.spacing = 6;
-        win.margins = 10;
+        win.spacing = 5;
+        win.margins = 8;
 
+        // Tier 1A: Source Layer & File Selector
         var selRow = win.add("group");
         selRow.orientation = "row";
         selRow.alignChildren = ["left", "center"];
         selRow.spacing = 6;
 
-        var btnFetch = selRow.add("button", undefined, "🔄 Lấy Layer đang chọn");
-        btnFetch.preferredSize.width = 165;
-        var ddFiles = selRow.add("dropdownlist", undefined, ["(Chọn nhanh file PNG...)"]);
-        ddFiles.preferredSize.width = 345;
+        var btnFetch = selRow.add("button", undefined, "🔄 Lấy Layer AE");
+        btnFetch.preferredSize.width = 135;
+        var ddFiles = selRow.add("dropdownlist", undefined, ["(Chọn nhanh file ảnh...)"]);
+        ddFiles.preferredSize.width = 375;
 
+        // Tier 1B: 1-Click Presets + Undo
         var presetRow = win.add("group");
         presetRow.orientation = "row";
         presetRow.alignChildren = ["fill", "center"];
-        presetRow.spacing = 6;
+        presetRow.spacing = 5;
 
-        var btnLines = presetRow.add("button", undefined, "📑 Gộp theo Dòng");
-        var btnWords = presetRow.add("button", undefined, "🔤 Tách từng Từ");
-        var btnIcons = presetRow.add("button", undefined, "✨ Dòng + Tách Icon");
+        var btnLines = presetRow.add("button", undefined, "📑 Theo Dòng");
+        var btnWords = presetRow.add("button", undefined, "🔤 Từng Từ");
+        var btnIcons = presetRow.add("button", undefined, "✨ Tách Icon");
+        var btnUndo = presetRow.add("button", undefined, "↩️ Undo");
+        btnUndo.preferredSize.width = 75;
 
-        var clusterPanel = win.add("panel", undefined, "Chọn Cụm đang gán (Click vào chữ trên hình bên dưới để đổi Cụm):");
-        clusterPanel.orientation = "row";
-        clusterPanel.alignChildren = ["left", "center"];
-        clusterPanel.spacing = 8;
-        clusterPanel.margins = [10, 12, 10, 6];
-
-        for (var k = 1; k <= 6; k++) {{
-            var rb = clusterPanel.add("radiobutton", undefined, "Cụm " + k);
-            if (k === 1) rb.value = true;
-            rb.clusterIdx = k;
-            rb.onClick = function() {{
-                activeCluster = this.clusterIdx;
-            }};
-        }}
-
-        var imgGroup = win.add("panel", undefined, "Preview Đường Mask & Tên Chữ (Click vào chữ để gán vào Cụm đang chọn):");
+        // Tier 2: Direct-Manipulation Preview Canvas
+        var imgGroup = win.add("panel", undefined, "Preview (Click 2 từ = Gộp cụm | Click lại/Shift = Tách riêng | Alt+Click = Cắt đôi):");
         imgGroup.orientation = "column";
         imgGroup.alignChildren = ["center", "center"];
         imgGroup.margins = [6, 12, 6, 6];
 
         var previewImg = imgGroup.add("image", undefined);
-        previewImg.preferredSize = [520, 360];
+        previewImg.preferredSize = [520, 340];
 
-        var paramPanel = win.add("panel", undefined, "Thông số Đường Mask & Anchor Point:");
+        // Tier 3: 1-Line Editable Layer Names
+        var nameRow = win.add("group");
+        nameRow.orientation = "row";
+        nameRow.alignChildren = ["left", "center"];
+        nameRow.spacing = 6;
+
+        var lblName = nameRow.add("statictext", undefined, "Tên Layer:");
+        lblName.preferredSize.width = 62;
+        var txtNames = nameRow.add("edittext", undefined, "");
+        txtNames.preferredSize.width = 450;
+        txtNames.helpTip = "Tên các Layer sẽ tạo trong AE (ngăn cách bởi dấu |). Bạn có thể sửa trực tiếp tại đây!";
+
+        // Collapsible Advanced Settings (hidden by default to keep UI ultra-clean)
+        var paramPanel = win.add("panel", undefined, "Thông số nâng cao (Mask & Anchor Point):");
         paramPanel.orientation = "column";
         paramPanel.alignChildren = ["fill", "top"];
         paramPanel.spacing = 4;
         paramPanel.margins = [10, 12, 10, 6];
+        paramPanel.visible = false;
+        paramPanel.maximumSize.height = 0;
 
         var padRow = paramPanel.add("group");
         padRow.orientation = "row";
@@ -1709,17 +2097,27 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         var chkAnchor = paramPanel.add("checkbox", undefined, "Tự động đặt tâm Anchor Point (+) vào chính giữa từng cụm chữ");
         chkAnchor.value = true;
 
+        // Tier 4: Primary Action Row
         var botRow = win.add("group");
         botRow.orientation = "row";
         botRow.alignChildren = ["fill", "center"];
-        botRow.spacing = 8;
+        botRow.spacing = 6;
 
-        var btnPush = botRow.add("button", undefined, "🚀 TÁCH LAYER & ĐẶT TÊN THEO CHỮ TRONG AE");
+        var btnPush = botRow.add("button", undefined, "🚀 TÁCH LAYER VÀO AE");
+        btnPush.preferredSize.width = 390;
         btnPush.preferredSize.height = 34;
-        var btnWeb = botRow.add("button", undefined, "🌐 Mở Bảng Web (Dao Cắt)");
-        btnWeb.preferredSize.height = 34;
 
-        var statusTxt = win.add("statictext", undefined, "Sẵn sàng.");
+        var btnGear = botRow.add("button", undefined, "⚙️");
+        btnGear.preferredSize.width = 48;
+        btnGear.preferredSize.height = 34;
+        btnGear.helpTip = "Ẩn/Hiện thông số nâng cao (Padding, Feather, Anchor Point)";
+
+        var btnWeb = botRow.add("button", undefined, "🌐");
+        btnWeb.preferredSize.width = 48;
+        btnWeb.preferredSize.height = 34;
+        btnWeb.helpTip = "Mở giao diện Web đầy đủ (Dao cắt tự do)";
+
+        var statusTxt = win.add("statictext", undefined, "Sẵn sàng. Click chọn Layer trên AE để bắt đầu.");
         statusTxt.characters = 74;
 
         function refreshPreview(res) {{
@@ -1745,7 +2143,9 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
                     isUpdatingDropdown = false;
                 }}
                 var namesStr = (res.clusterNames && res.clusterNames.length) ? res.clusterNames.join(" | ") : "";
-                statusTxt.text = "✅ Layers: " + namesStr;
+                txtNames.text = namesStr;
+                var selHint = res.selectedText ? (" [Đang chọn: " + res.selectedText + " -> Click từ khác để gộp, hoặc click lại để tách riêng]") : "";
+                statusTxt.text = "✅ " + (res.clusterCount || 0) + " Cụm (" + (res.blockCount || 0) + " từ)" + selHint;
             }} else if (res && res.error) {{
                 statusTxt.text = "⚠️ " + res.error;
             }}
@@ -1769,7 +2169,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         function loadCurrentFromAE() {{
             var info = detectSelectedLayerOrItemInAE();
             if (!info || !info.path) {{
-                statusTxt.text = "⚠️ Hãy click chọn 1 Layer PNG/PSD trên Timeline hoặc trong Project Panel!";
+                statusTxt.text = "⚠️ Hãy click chọn 1 Layer ảnh/PSD trên Timeline hoặc trong Project Panel!";
                 return;
             }}
             loadFileByPath(info.path, info);
@@ -1802,10 +2202,26 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             refreshPreview(res);
         }};
 
+        btnUndo.onClick = function() {{
+            var res = callApi("/api/su_undo", "");
+            refreshPreview(res);
+        }};
+
+        btnGear.onClick = function() {{
+            var showAdv = !paramPanel.visible;
+            paramPanel.visible = showAdv;
+            paramPanel.maximumSize.height = showAdv ? 140 : 0;
+            win.layout.layout(true);
+            win.layout.resize();
+        }};
+
         previewImg.addEventListener("mousedown", function(e) {{
             var x = e.clientX || e.localX || 0;
             var y = e.clientY || e.localY || 0;
-            var res = callApi("/api/su_click", "x=" + x + "&y=" + y + "&cluster=" + activeCluster);
+            var kb = ScriptUI.environment.keyboardState;
+            var alt = (e.altKey || (kb && kb.altKey)) ? "1" : "0";
+            var shift = (e.shiftKey || (kb && kb.shiftKey)) ? "1" : "0";
+            var res = callApi("/api/su_click", "x=" + x + "&y=" + y + "&alt=" + alt + "&shift=" + shift);
             refreshPreview(res);
         }});
 
@@ -1825,6 +2241,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             statusTxt.text = "⏳ Đang tách Layer và đặt tên theo chữ trong After Effects...";
             var fth = Math.round(sldFth.value);
             var anc = chkAnchor.value ? "1" : "0";
+            writeReqJson('{{"customPipeNames": "' + escJson(txtNames.text) + '"}}');
             var res = callApi("/api/su_push_json", "feather=" + fth + "&anchor=" + anc);
             if (res && res.ok && res.jsxPath) {{
                 $.evalFile(new File(res.jsxPath));
@@ -2831,6 +3248,11 @@ def list_sibling_pngs(file_path: str) -> list:
 def serialize_scriptui_summary() -> dict:
     clusters = STATE.compute_cluster_masks()
     preview_path = STATE.render_scriptui_preview(clusters)
+    sel_txt = ""
+    if STATE.selected_block_id is not None:
+        sb = next((b for b in STATE.blocks if b["id"] == STATE.selected_block_id), None)
+        if sb:
+            sel_txt = sb.get("text") or f"Chữ {sb['id']}"
     return {
         "ok": True,
         "filePath": STATE.file_path,
@@ -2840,7 +3262,9 @@ def serialize_scriptui_summary() -> dict:
         "previewPath": preview_path,
         "blockCount": len(STATE.blocks),
         "clusterCount": len(clusters),
-        "clusterNames": [c["name"] for c in clusters]
+        "clusterNames": [c["name"] for c in clusters],
+        "selectedBlockId": STATE.selected_block_id,
+        "selectedText": sel_txt
     }
 
 
@@ -2938,19 +3362,29 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
             STATE.apply_preset_mode(mode)
             self._send_json(serialize_scriptui_summary())
 
+        elif parsed.path == "/api/su_undo":
+            STATE.undo()
+            self._send_json(serialize_scriptui_summary())
+
         elif parsed.path == "/api/su_click":
             px = float(qs.get("x", [0])[0])
             py = float(qs.get("y", [0])[0])
-            cid = int(qs.get("cluster", [1])[0])
+            alt_key = qs.get("alt", ["0"])[0] == "1"
+            shift_key = qs.get("shift", ["0"])[0] == "1"
             scale = STATE.preview_scale if STATE.preview_scale > 0 else 1.0
             off_x = getattr(STATE, "preview_off_x", 0)
             off_y = getattr(STATE, "preview_off_y", 0)
             ix = (px - off_x) / scale
             iy = (py - off_y) / scale
-            for b in STATE.blocks:
-                if b["x"] <= ix <= b["x"] + b["w"] and b["y"] <= iy <= b["y"] + b["h"]:
-                    b["cluster_id"] = cid
-                    break
+            if "cluster" in qs:
+                cid = int(qs.get("cluster", [1])[0])
+                for b in STATE.blocks:
+                    if b["x"] <= ix <= b["x"] + b["w"] and b["y"] <= iy <= b["y"] + b["h"]:
+                        STATE.push_history()
+                        b["cluster_id"] = cid
+                        break
+            else:
+                STATE.smart_click(ix, iy, alt_key=alt_key, shift_key=shift_key)
             self._send_json(serialize_scriptui_summary())
 
         elif parsed.path == "/api/su_params":
@@ -2961,6 +3395,14 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/su_push_json":
             feather = float(qs.get("feather", [5.0])[0])
             center_anchor = qs.get("anchor", ["1"])[0] == "1"
+            req_file = Path(tempfile.gettempdir()) / "ae_splitter_req.json"
+            if req_file.exists():
+                try:
+                    req_data = json.loads(req_file.read_text(encoding="utf-8"))
+                    if "customPipeNames" in req_data:
+                        STATE.set_cluster_names_from_pipe_str(req_data.get("customPipeNames", ""))
+                except Exception:
+                    pass
             clusters = STATE.compute_cluster_masks()
             jsx_push_path = Path(tempfile.gettempdir()) / "ae_splitter_direct_push.jsx"
             jsx_push_code = build_push_jsx_code(
