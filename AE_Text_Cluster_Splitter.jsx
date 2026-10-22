@@ -3,7 +3,7 @@
 // ============================================================================
 (function(thisObj) {
     var PORT = 8765;
-    var PY_EXE = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/.venv/bin/python";
+    var PY_EXE = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/ae-text-cluster-splitter/../.venv/bin/python";
     var SCRIPT_PY = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/ae-text-cluster-splitter/text_cluster_splitter.py";
     var REQ_FILE = "/var/folders/sj/1cktqpfx2xb566cpz_76w0k40000gp/T/ae_splitter_req.json";
     var IS_MAC = ($.os.indexOf("Mac") !== -1);
@@ -268,15 +268,45 @@
         var statusTxt = contentGrp.add("statictext", undefined, "Sẵn sàng. Click chọn Layer trên AE để bắt đầu.");
         statusTxt.characters = 70;
 
+        var natW = 0, natH = 0;
+
         function applyScrollOffset() {
-            contentGrp.location = [2, 2 - Math.round(vScroll.value)];
+            contentGrp.location = [0, -Math.round(vScroll.value)];
         }
 
+        // Measure the natural (unclipped) content size from the visible children laid out by ScriptUI
+        function measureContent() {
+            var h = 0, w = 0;
+            for (var i = 0; i < contentGrp.children.length; i++) {
+                var c = contentGrp.children[i];
+                if (!c.visible || !c.size) continue;
+                h = Math.max(h, c.location[1] + c.size[1]);
+                w = Math.max(w, c.location[0] + c.size[0]);
+            }
+            natH = h + 6;
+            natW = w + 4;
+        }
+
+        // Manually clip the viewport to the docked panel size (the layout manager would otherwise grow it to fit
+        // the content, so the panel gets cropped and the scrollbar has nothing to scroll)
         function updateScroll() {
-            var contH = (contentGrp.size && contentGrp.size[1]) ? contentGrp.size[1] : (paramPanel.visible ? 520 : 395);
-            var winH = (win.size && win.size[1]) ? win.size[1] : 395;
-            var maxY = Math.max(220, contH - Math.max(150, winH - 16));
-            vScroll.maxvalue = maxY;
+            if (!win.size) return;
+            if (!natH) measureContent();
+            var M = 4, SB = 15;
+            var W = win.size[0], H = win.size[1];
+            var viewW = Math.max(60, W - 2 * M - SB - 3);
+            var viewH = Math.max(60, H - 2 * M);
+            mainArea.location = [M, M];
+            mainArea.size = [W - 2 * M, viewH];
+            viewport.location = [0, 0];
+            viewport.size = [viewW, viewH];
+            contentGrp.size = [Math.max(natW, viewW), natH];
+            vScroll.location = [W - 2 * M - SB, 0];
+            vScroll.size = [SB, viewH];
+            var maxY = Math.max(0, natH - viewH);
+            vScroll.maxvalue = Math.max(1, maxY);
+            vScroll.jumpdelta = Math.max(30, Math.round(viewH * 0.8));
+            vScroll.enabled = (maxY > 0);
             if (vScroll.value > maxY) vScroll.value = maxY;
             if (vScroll.value < 0) vScroll.value = 0;
             applyScrollOffset();
@@ -391,8 +421,10 @@
             var showAdv = !paramPanel.visible;
             paramPanel.visible = showAdv;
             paramPanel.maximumSize.height = showAdv ? 140 : 0;
+            contentGrp.size = undefined;
             win.layout.layout(true);
             win.layout.resize();
+            measureContent();
             updateScroll();
         };
 

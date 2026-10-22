@@ -544,6 +544,8 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
         ("THỨ", "NGHIỆM"): ("THỬ", "NGHIỆM"),
         ("Ó", "CHẮC"): ("CÓ", "CHẮC"),
         ("BÊ", "YÊU"): ("BÉ", "YÊU"),
+        ("HỌC", "VE"): ("HỌC", "VỀ"),
+        ("VƯỢT", "TRỌI"): ("VƯỢT", "TRỘI"),
     }
     for k in range(len(out_tokens) - 1):
         w1 = re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", out_tokens[k])
@@ -1226,7 +1228,13 @@ class ImageClusterState:
         core_lums = lum[core > 0]
         if core_lums.size > 100:
             p10_l, p90_l = np.percentile(core_lums, [10, 90])
-            is_flat_mono = bool((p90_l - p10_l) < 25.0)
+            # Flat 2D vector text = uniform colour AND crisp alpha edges. Glowing/shadowed 3D text can also have a
+            # uniform face colour, but a wide band of semi-transparent glow around the core: it must keep the 3D path.
+            # (Only count soft pixels > 4 px away from the opaque core, so 1-2 px anti-aliasing / downscale edges don't count.)
+            vis_px = int(np.count_nonzero(a > 10))
+            d_out = cv2.distanceTransform((1 - core).astype(np.uint8), cv2.DIST_L2, 3)
+            glow_frac = float(np.count_nonzero((a > 10) & (d_out > 4))) / float(max(1, vis_px))
+            is_flat_mono = bool((p90_l - p10_l) < 25.0 and glow_frac < 0.15)
         else:
             is_flat_mono = False
 
@@ -1658,6 +1666,18 @@ class ImageClusterState:
         line_crops = [lc[0] for lc in line_crops]
 
         cleaned_lines = [clean_ocr_line_tokens(pr, hint_words) for pr in raw_preds]
+
+        # Restore trailing '!' / '?' from the filename hint when the OCR drops a stylised 3D punctuation mark
+        hint_punct = {}
+        for mw, mp in re.findall(r"([A-Za-zÀ-ỹ0-9]+)\s*([!?])", fname_clean):
+            hint_punct[strip_accents(mw.upper())] = mp
+        if hint_punct:
+            for toks in cleaned_lines:
+                if toks:
+                    last = toks[-1]
+                    core_l = re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", last)
+                    if core_l and last == core_l and strip_accents(core_l) in hint_punct:
+                        toks[-1] = last + hint_punct[strip_accents(core_l)]
 
         ordered_lines = []
         for li, ln in enumerate(lines):
@@ -2898,15 +2918,45 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         var statusTxt = contentGrp.add("statictext", undefined, "Sẵn sàng. Click chọn Layer trên AE để bắt đầu.");
         statusTxt.characters = 70;
 
+        var natW = 0, natH = 0;
+
         function applyScrollOffset() {{
-            contentGrp.location = [2, 2 - Math.round(vScroll.value)];
+            contentGrp.location = [0, -Math.round(vScroll.value)];
         }}
 
+        // Measure the natural (unclipped) content size from the visible children laid out by ScriptUI
+        function measureContent() {{
+            var h = 0, w = 0;
+            for (var i = 0; i < contentGrp.children.length; i++) {{
+                var c = contentGrp.children[i];
+                if (!c.visible || !c.size) continue;
+                h = Math.max(h, c.location[1] + c.size[1]);
+                w = Math.max(w, c.location[0] + c.size[0]);
+            }}
+            natH = h + 6;
+            natW = w + 4;
+        }}
+
+        // Manually clip the viewport to the docked panel size (the layout manager would otherwise grow it to fit
+        // the content, so the panel gets cropped and the scrollbar has nothing to scroll)
         function updateScroll() {{
-            var contH = (contentGrp.size && contentGrp.size[1]) ? contentGrp.size[1] : (paramPanel.visible ? 520 : 395);
-            var winH = (win.size && win.size[1]) ? win.size[1] : 395;
-            var maxY = Math.max(220, contH - Math.max(150, winH - 16));
-            vScroll.maxvalue = maxY;
+            if (!win.size) return;
+            if (!natH) measureContent();
+            var M = 4, SB = 15;
+            var W = win.size[0], H = win.size[1];
+            var viewW = Math.max(60, W - 2 * M - SB - 3);
+            var viewH = Math.max(60, H - 2 * M);
+            mainArea.location = [M, M];
+            mainArea.size = [W - 2 * M, viewH];
+            viewport.location = [0, 0];
+            viewport.size = [viewW, viewH];
+            contentGrp.size = [Math.max(natW, viewW), natH];
+            vScroll.location = [W - 2 * M - SB, 0];
+            vScroll.size = [SB, viewH];
+            var maxY = Math.max(0, natH - viewH);
+            vScroll.maxvalue = Math.max(1, maxY);
+            vScroll.jumpdelta = Math.max(30, Math.round(viewH * 0.8));
+            vScroll.enabled = (maxY > 0);
             if (vScroll.value > maxY) vScroll.value = maxY;
             if (vScroll.value < 0) vScroll.value = 0;
             applyScrollOffset();
@@ -3021,8 +3071,10 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             var showAdv = !paramPanel.visible;
             paramPanel.visible = showAdv;
             paramPanel.maximumSize.height = showAdv ? 140 : 0;
+            contentGrp.size = undefined;
             win.layout.layout(true);
             win.layout.resize();
+            measureContent();
             updateScroll();
         }};
 
