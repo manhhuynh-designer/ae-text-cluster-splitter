@@ -1321,6 +1321,25 @@ class ImageClusterState:
                 if collinear_peers == 0:
                     needs_ai_check = True
 
+            if is_cand and needs_ai_check:
+                # A blob hugging the top/bottom of a much taller text blob is a diacritic (e.g. the stacked
+                # '^' + '`' of 'Ồ', 'Ầ', 'Ề'), not a word and not a background decoration: skip the AI check, let
+                # the hat merger below (merged into the word under it), and never erase it as background.
+                is_mark = False
+                for o in raw_blobs:
+                    if o is b or o["h"] < b["h"] * 1.8 or o["f_sol"] < 0.22:
+                        continue
+                    if b["w"] > o["w"] * 0.6 or b["area"] > o["area"] * 0.3:
+                        continue
+                    ov_x = max(0, min(b["x"] + b["w"], o["x"] + o["w"]) - max(b["x"], o["x"]))
+                    v_gap = max(b["y"] - (o["y"] + o["h"]), o["y"] - (b["y"] + b["h"]))
+                    if ov_x >= b["w"] * 0.5 and -8 <= v_gap <= max(40, int(o["h"] * 0.30)):
+                        is_mark = True
+                        break
+                if is_mark:
+                    needs_ai_check = False
+                    b["is_mark"] = True
+
             if is_cand and needs_ai_check and viet_pred is not None:
                 # Ask AI (VietOCR) whether this isolated medium-height blob is real text or a background decoration
                 bx, by, bw_b, bh_b = b["x"], b["y"], b["w"], b["h"]
@@ -1389,7 +1408,7 @@ class ImageClusterState:
                         parent["area"] += b["area"]
                         is_hat = True
                         break
-            if not is_hat:
+            if not is_hat and not b.get("is_mark"):
                 seeds.append(b)
 
         # Detach small diacritic pieces hanging BELOW a seed's letter band (e.g. the '~' of 'DỄ' fused by w_bin
@@ -1411,7 +1430,7 @@ class ImageClusterState:
             removed = False
             for k in range(1, nfc):
                 kx, ky, kw, kh, ka = sfc[k]
-                if k in big_k or ka < 45:
+                if k in big_k or ka < 8:
                     continue
                 if ky >= band_b - band_h * 0.08 and kh <= band_h * 0.40:
                     part_face = np.zeros_like(sd["mask"])
@@ -1517,16 +1536,38 @@ class ImageClusterState:
                 y1 = max(y1, prev_y2)
             x2 = min(self.w, max(c["x"] + c["w"] for c in ln) + 15)
             y2 = min(self.h, max(max(c["y"] + c["h"], c["body_y"] + c["body_h"], c.get("full_y2", 0)) for c in ln) + 28)
-            crop = cv2.cvtColor(norm_gray[y1:y2, x1:x2], cv2.COLOR_GRAY2RGB)
-            line_crops.append(Image.fromarray(crop))
+            crop_g = norm_gray[y1:y2, x1:x2].copy()
+            # Blank out letters that belong to OTHER lines so the OCR never reads stray strokes of the line above/below
+            for lj, ln_o in enumerate(lines):
+                if lj == li_c:
+                    continue
+                for c_o in ln_o:
+                    crop_g[c_o["mask"][y1:y2, x1:x2]] = 255
+            crop = cv2.cvtColor(crop_g, cv2.COLOR_GRAY2RGB)
+            alt = []
+            # Alternative tighter-top crop: tall stacked marks (e.g. 'Ố', 'Ễ', 'Ồ') squash letters when resized to
+            # the 32 px OCR height; the AI reads both versions and the more confident reading wins.
+            med_bh = float(np.median([c["body_h"] for c in ln]))
+            y1b = max(y1, min(c["body_y"] for c in ln) - int(med_bh * 0.30))
+            if y1b - y1 >= 12:
+                alt.append(Image.fromarray(cv2.cvtColor(crop_g[y1b - y1:, :], cv2.COLOR_GRAY2RGB)))
+            line_crops.append((Image.fromarray(crop), alt))
 
-        if viet_pred is not None and line_crops:
+        raw_preds = []
+        for main_im, alts in line_crops:
+            if viet_pred is None:
+                raw_preds.append("")
+                continue
             try:
-                raw_preds = viet_pred.predict_batch(line_crops)
+                best_txt, best_conf = viet_pred.predict_with_conf(main_im)
+                for a_im in alts:
+                    t_a, c_a = viet_pred.predict_with_conf(a_im)
+                    if c_a > best_conf + 0.02:
+                        best_txt, best_conf = t_a, c_a
+                raw_preds.append(best_txt)
             except Exception:
-                raw_preds = [""] * len(line_crops)
-        else:
-            raw_preds = [""] * len(line_crops)
+                raw_preds.append("")
+        line_crops = [lc[0] for lc in line_crops]
 
         cleaned_lines = [clean_ocr_line_tokens(pr, hint_words) for pr in raw_preds]
 
@@ -1580,45 +1621,67 @@ class ImageClusterState:
                     continue
                 # Skip hollow background arcs or large non-diacritic background elements
                 f_sol_c = int(np.sum(cmask_i)) / float(max(1, cw_c * ch_c))
-                if f_sol_c < 0.22 and carea > 1200:
+                if f_sol_c < 0.22 and carea > 1200 and (cw_c > 260 or ch_c > 160):
                     continue
                 # Skip if already mostly assigned to a seed or icon
                 if np.mean(seed_map[cmask_w] > 0) >= 0.45:
                     continue
                 best_item = None
                 best_cost = 1e12
+                # True pixel distance from this mark to each word's letter faces: decides ownership of marks sitting
+                # between two lines (e.g. the dot of 'Ạ' in 'SẠCH' vs the '`' of 'VÀ' just below it).
+                R = 180
+                wy0, wy1_ = max(0, cy1 - R), min(self.h, cy1 + ch_c + R)
+                wx0, wx1_ = max(0, cx1 - R), min(self.w, cx1 + cw_c + R)
+                comp_face_win = cmask_i[wy0:wy1_, wx0:wx1_]
+                # Solid round blob = dấu nặng dot (belongs to the word ABOVE it); curved/elongated marks
+                # (´ ` ~ ^ ˘ and the hook of 'ả') belong to the word BELOW them.
+                fys, fxs = np.where(cmask_i[cy1:cy1 + ch_c, cx1:cx1 + cw_c])
+                if len(fxs):
+                    fbw, fbh = int(fxs.max() - fxs.min() + 1), int(fys.max() - fys.min() + 1)
+                    is_round_dot = (len(fxs) / float(fbw * fbh) >= 0.55) and (0.55 <= fbw / float(fbh) <= 1.8)
+                else:
+                    fbw, fbh = cw_c, ch_c
+                    is_round_dot = False
                 for w_item in text_items:
                     wx1, wy1, ww_w, wh_w = w_item["x"], w_item["y"], w_item["w"], w_item["h"]
                     h_dist = max(0.0, float(max(cx1 - (wx1 + ww_w), wx1 - (cx1 + cw_c))))
-                    h_ov = max(0.0, float(min(cx1 + cw_c, wx1 + ww_w) - max(cx1, wx1)))
-                    h_ov_frac = h_ov / float(max(1, cw_c))
                     v_ov = max(0, min(cy1 + ch_c, wy1 + wh_w) - max(cy1, wy1))
-                    if v_ov >= ch_c * 0.35:
+                    bias = 0.0
+                    h_ov_c = max(0, min(cx1 + cw_c, wx1 + ww_w) - max(cx1, wx1)) / float(max(1, cw_c))
+                    hangs_below = h_ov_c >= 0.5 and (cy1 + ch_c) > (wy1 + wh_w) + 4
+                    if v_ov >= ch_c * 0.35 and not hangs_below:
                         # Same horizontal line (e.g. '!', '?', '.', or broken stroke) -> must be horizontally adjacent
                         if h_dist > max(38.0, wh_w * 0.35):
                             continue
-                        cost = h_dist * 1.15 + abs(ccy - w_item["cy"]) * 0.25 - h_ov_frac * 35.0
                     elif (cy1 + ch_c) <= (wy1 + 18):
                         # Component is ABOVE w_item -> Vietnamese upper diacritic (^, ´, `, ?, ~, ˘)
                         v_gap_above = max(0.0, float(wy1 - (cy1 + ch_c)))
                         if h_dist > 24.0 or v_gap_above > max(58.0, wh_w * 0.42):
                             continue
-                        cost = v_gap_above * 1.0 + h_dist * 2.5 - h_ov_frac * 65.0
+                        if is_round_dot:
+                            bias = 10.0
                     else:
                         # Component is BELOW w_item -> Only valid if it is a compact dot (dấu nặng '.' or dot of '!'/'?')
                         v_gap_below = max(0.0, float(cy1 - (wy1 + wh_w)))
                         if h_dist > 20.0 or v_gap_below > max(38.0, wh_w * 0.26):
                             continue
+                        # Measured on the undilated letter face (w_bin dilation widens marks by ~14 px)
                         is_compact_dot = (
-                            cw_c <= max(45, int(wh_w * 0.60)) and
-                            ch_c <= max(42, int(wh_w * 0.45)) and
-                            (cw_c / float(max(1, ch_c))) <= 1.6
+                            fbw <= max(45, int(wh_w * 0.60)) and
+                            fbh <= max(42, int(wh_w * 0.45)) and
+                            (fbw / float(max(1, fbh))) <= 1.8
                         )
-                        if is_compact_dot:
-                            # Small bias: an 'above-hat' reading for the next line wins ties over a 'below-dot' reading
-                            cost = v_gap_below * 1.15 + h_dist * 2.5 - h_ov_frac * 65.0 + 12.0
-                        else:
+                        if not is_compact_dot:
                             continue
+                        bias = 0.0 if is_round_dot else 4.0
+                    item_face_win = w_item["mask"][wy0:wy1_, wx0:wx1_] & (face_bin[wy0:wy1_, wx0:wx1_] > 0)
+                    if np.any(item_face_win):
+                        d_map = distance_transform_edt(~item_face_win)
+                        d_pix = float(d_map[comp_face_win].min())
+                    else:
+                        d_pix = float(R) + h_dist
+                    cost = d_pix + bias + h_dist * 0.5
                     if cost < best_cost:
                         best_cost = cost
                         best_item = w_item
@@ -1626,6 +1689,13 @@ class ImageClusterState:
                     unassigned = cmask_w & (seed_map == 0)
                     seed_map[unassigned] = best_item["final_id"]
                     best_item["mask"] = best_item["mask"] | unassigned
+                    if np.any(unassigned):
+                        nx1 = min(best_item["x"], cx1)
+                        ny1 = min(best_item["y"], cy1)
+                        nx2 = max(best_item["x"] + best_item["w"], cx1 + cw_c)
+                        ny2 = max(best_item["y"] + best_item["h"], cy1 + ch_c)
+                        best_item["x"], best_item["y"] = int(nx1), int(ny1)
+                        best_item["w"], best_item["h"] = int(nx2 - nx1), int(ny2 - ny1)
 
         if ordered_items:
             # Propagate from the actual letter FACE pixels (not the dilated w_bin seed) so 3D outlines/extrusions
@@ -1643,24 +1713,39 @@ class ImageClusterState:
             valid = (core > 0) & ((dist_to_seed <= max_stroke_dist) | (seed_map > 0))
             lab_map = np.where(valid, nearest_seed, 0).astype(np.int32)
 
-            # Opaque islands (one connected core component) that contain face pixels of exactly ONE word
-            # are assigned wholly to that word, so a detached diacritic never gets split between two words.
+            # Opaque islands (one connected core component) whose letter faces belong to ONE word (ignoring tiny
+            # specks of other words) are assigned wholly to that word, so a diacritic is never split between words.
             ncc, cc = cv2.connectedComponents(core.astype(np.uint8), connectivity=8)
             if ncc > 1:
                 cc_flat = cc.ravel()
                 src_flat = src_map.ravel()
                 sel = (src_flat > 0) & (cc_flat > 0)
                 if np.any(sel):
-                    pairs = np.unique(np.stack([cc_flat[sel], src_flat[sel]], axis=1), axis=0)
-                    comp_ids, comp_counts = np.unique(pairs[:, 0], return_counts=True)
-                    single = comp_ids[comp_counts == 1]
-                    if len(single):
-                        owner = np.zeros(ncc, dtype=np.int32)
-                        sp = pairs[np.isin(pairs[:, 0], single)]
-                        owner[sp[:, 0]] = sp[:, 1]
-                        own_map = owner[cc]
-                        fix = (own_map > 0) & (lab_map > 0)
-                        lab_map[fix] = own_map[fix]
+                    pair_keys = cc_flat[sel].astype(np.int64) * (int(src_flat.max()) + 1) + src_flat[sel]
+                    uk, uc = np.unique(pair_keys, return_counts=True)
+                    nmax = int(src_flat.max()) + 1
+                    p_cc, p_src = uk // nmax, uk % nmax
+                    face_tot = np.bincount(src_flat[src_flat > 0], minlength=nmax)
+                    owner = np.zeros(ncc, dtype=np.int32)
+                    for ci in np.unique(p_cc):
+                        msk = p_cc == ci
+                        srcs, cnts = p_src[msk], uc[msk]
+                        k = int(np.argmax(cnts))
+                        major, c_major = int(srcs[k]), int(cnts[k])
+                        ok = True
+                        for s_o, c_o in zip(srcs, cnts):
+                            if int(s_o) == major:
+                                continue
+                            # A minority word may only lose a tiny speck of itself (e.g. a stray sliver inside
+                            # the '~' of 'DỄ'), never a real chunk of its own glyphs
+                            if not (c_o < 0.1 * c_major and c_o < 0.05 * face_tot[int(s_o)]):
+                                ok = False
+                                break
+                        if ok:
+                            owner[ci] = major
+                    own_map = owner[cc]
+                    fix = (own_map > 0) & (lab_map > 0)
+                    lab_map[fix] = own_map[fix]
             self.label_map = lab_map
         else:
             self.label_map = np.zeros((self.h, self.w), dtype=np.int32)
