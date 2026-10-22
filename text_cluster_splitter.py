@@ -320,14 +320,15 @@ VN_WORD_FIXES = {
     "AO": "ÁO", "ĐE": "ĐỂ", "ĐỀ": "ĐỂ", "CO": "CÓ",
     "PHỐT": "PHÚT", "PHOT": "PHÚT", "PHUT": "PHÚT", "CUNG": "CỨNG",
     "ĐÀI": "DÀI", "TỐO": "TỐC", "TOO": "TỐC", "TOC": "TỐC",
-    "HOI": "HÔI", "MOC": "MỐC", "LAU": "LÂU", "SACH": "SẠCH",
-    "KHU": "KHỬ", "MUI": "MÙI", "VUOT": "VƯỢT", "TROI": "TRỘI", "TRỘN": "TRỘI!",
+    "HOI": "HÔI", "MOC": "MỐC", "MOCI": "MỐC!", "MỐCI": "MỐC!", "LAU": "LÂU", "SACH": "SẠCH",
+    "KHU": "KHỬ", "MUI": "MÙI", "VUOT": "VƯỢT", "TROI": "TRỘI", "TRỘN": "TRỘI!", "CHI": "CHỈ",
     "VET": "VẾT", "BAN": "BẨN", "BẦN": "BẨN", "DAU": "ĐẦU",
     "BOT": "BỌT", "CUC": "CỰC", "LIÊN": "LIỀN",
     "CHOP": "CHỚP", "NHOANG": "NHOÁNG", "NUOC": "NƯỚC",
     "MANH": "MẠNH", "LAN": "LẦN", "XA": "XẢ", "DANH": "ĐÁNH",
     "TUC": "TỨC", "THI": "THÌ", "CONG": "CÔNG", "NGHE": "NGHỆ",
     "DOC": "ĐỘC", "QUYEN": "QUYỀN", "MOT": "MỘT", "MA": "MÀ", "VA": "VÀ",
+    "SIỀU": "SIÊU", "SIEU": "SIÊU", "ĐẮM": "ĐẪM",
 }
 
 VIETOCR_VOCAB_CHARS = (
@@ -347,7 +348,7 @@ class VietOCROnnxPredictor:
         self.enc_sess = ort.InferenceSession(enc_path, providers=["CPUExecutionProvider"])
         self.dec_sess = ort.InferenceSession(dec_path, providers=["CPUExecutionProvider"])
 
-    def predict(self, pil_img) -> str:
+    def predict_with_conf(self, pil_img) -> tuple:
         from PIL import Image
         img = pil_img.convert("RGB")
         w, h = img.size
@@ -358,15 +359,24 @@ class VietOCROnnxPredictor:
         enc_out, hidden = self.enc_sess.run(None, {"img": inp})
         tgt = np.array([1], dtype=np.int64)
         chars = []
+        probs = []
         for _ in range(64):
             logits, hidden = self.dec_sess.run(None, {"tgt": tgt, "hidden": hidden, "encoder_outputs": enc_out})
-            tok = int(np.argmax(logits[0]))
+            l = logits[0]
+            exp_l = np.exp(l - np.max(l))
+            p = exp_l / np.sum(exp_l)
+            tok = int(np.argmax(l))
             if tok == 2:
                 break
             if tok in VIETOCR_I2C:
                 chars.append(VIETOCR_I2C[tok])
+                probs.append(float(p[tok]))
             tgt = np.array([tok], dtype=np.int64)
-        return "".join(chars)
+        return "".join(chars), (float(np.mean(probs)) if probs else 0.0)
+
+    def predict(self, pil_img) -> str:
+        txt, _ = self.predict_with_conf(pil_img)
+        return txt
 
     def predict_batch(self, pil_images: list) -> list:
         return [self.predict(im) for im in pil_images]
@@ -925,6 +935,154 @@ class ImageClusterState:
             s["is_icon"] = False
         return ln
 
+    def _verify_and_refine_line_words(self, aligned_ln: list, words_li: list, norm_gray: np.ndarray,
+                                      face_bin: np.ndarray, core: np.ndarray, viet_pred) -> list:
+        """
+        AI-in-the-Loop Word Verification & Boundary Refinement:
+        Evaluates each split word block with VietOCR and checks for:
+        1. Overlapping neighbor blocks (e.g. slanted 3D letters where top hat connected left and bottom connected right)
+        2. Severe width/character-ratio skew (e.g. 'ĐÁNH BA' + 'Y' instead of 'ĐÁNH' + 'BAY')
+        3. OCR boundary shifts (e.g. block k reads 'VẾ' and block k+1 reads 'TBẨN' instead of 'VẾT' | 'BẨN')
+        When a boundary error is detected between adjacent blocks (k, k+1), performs AI-Guided Valley Search
+        testing candidate vertical valleys with VietOCR to lock onto the true inter-word gap.
+        """
+        from PIL import Image
+        K = len(aligned_ln)
+        if K <= 1 or viet_pred is None or len(words_li) != K:
+            return aligned_ln
+
+        def _crop_block_pil(b_mask, bx, by, bw, bh):
+            y1 = max(0, by - 32)
+            y2 = min(self.h, by + bh + 18)
+            x1 = max(0, bx - 8)
+            x2 = min(self.w, bx + bw + 8)
+            sub_m = cv2.dilate(b_mask[y1:y2, x1:x2].astype(np.uint8), np.ones((15, 11), np.uint8))
+            arr = np.where(sub_m > 0, norm_gray[y1:y2, x1:x2], 255)
+            arr_pad = np.pad(arr, ((8, 8), (10, 10)), mode="constant", constant_values=255)
+            return Image.fromarray(cv2.cvtColor(arr_pad, cv2.COLOR_GRAY2RGB))
+
+        def _clean_base(s):
+            return strip_accents(re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", s or "")).upper()
+
+        for k in range(K - 1):
+            b1, b2 = aligned_ln[k], aligned_ln[k + 1]
+            exp1 = _clean_base(words_li[k])
+            exp2 = _clean_base(words_li[k + 1])
+            if not exp1 or not exp2:
+                continue
+
+            # Check 1: Do b1 and b2 overlap horizontally, or is their width ratio skewed vs character count ratio?
+            ov_x = (b1["x"] + b1["w"]) - b2["x"]
+            tot_w = float(max(1, b1["w"] + b2["w"]))
+            tot_c = float(max(1, len(exp1) + len(exp2)))
+            w_frac1 = b1["w"] / tot_w
+            c_frac1 = len(exp1) / tot_c
+            geom_skew = (ov_x > 16) or (abs(w_frac1 - c_frac1) > 0.17)
+
+            # Check 2: Ask AI (VietOCR) to read b1 and b2 individually
+            got1_raw, conf1 = viet_pred.predict_with_conf(_crop_block_pil(b1["mask"], b1["x"], b1["y"], b1["w"], b1["h"]))
+            got2_raw, conf2 = viet_pred.predict_with_conf(_crop_block_pil(b2["mask"], b2["x"], b2["y"], b2["w"], b2["h"]))
+            got1 = _clean_base(got1_raw)
+            got2 = _clean_base(got2_raw)
+
+            # Determine if AI detected a boundary shift between b1 and b2
+            ai_exact_match = (got1 == exp1 and got2 == exp2) and (ov_x <= 16)
+            if ai_exact_match:
+                continue
+
+            boundary_shifted = geom_skew or (
+                (len(got1) > len(exp1) and len(got2) < len(exp2)) or
+                (len(got1) < len(exp1) and len(got2) > len(exp2)) or
+                (got1 != exp1 and got2 != exp2)
+            )
+            if not boundary_shifted:
+                continue
+
+            # Perform AI-Guided Valley Search on the union of (b1, b2)
+            u_mask = b1["mask"] | b2["mask"]
+            u_ys, u_xs = np.where(u_mask)
+            if len(u_xs) == 0:
+                continue
+            ux, uy = int(u_xs.min()), int(u_ys.min())
+            uw, uh = int(u_xs.max() - ux + 1), int(u_ys.max() - uy + 1)
+            if uw < 48:
+                continue
+
+            f_slice = (face_bin[uy:uy + uh, ux:ux + uw] > 0) & u_mask[uy:uy + uh, ux:ux + uw]
+            c_slice = (core[uy:uy + uh, ux:ux + uw] > 0) & u_mask[uy:uy + uh, ux:ux + uw]
+            col_face = np.sum(f_slice, axis=0).astype(np.float32)
+            col_core = np.sum(c_slice, axis=0).astype(np.float32)
+            profile = 0.82 * col_face + 0.18 * col_core
+            if len(profile) >= 5:
+                profile = np.convolve(profile, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+            max_prof = max(float(profile.max()), 1.0)
+
+            expected_rel = int(uw * c_frac1)
+            win_half = max(45, int(uw * 0.24))
+            s_x1 = max(24, expected_rel - win_half)
+            s_x2 = min(uw - 24, expected_rel + win_half)
+            if s_x2 <= s_x1:
+                continue
+
+            xs_cand = np.arange(s_x1, s_x2)
+            dist_pen = 0.20 * ((xs_cand - expected_rel) / float(win_half)) ** 2
+            valley_scores = (profile[s_x1:s_x2] / max_prof) + dist_pen
+
+            # Pick up to 3 well-separated local valley minima to evaluate with AI (VietOCR)
+            cand_rels = []
+            order_idx = np.argsort(valley_scores)
+            for idx_v in order_idx:
+                r_x = int(s_x1 + idx_v)
+                if all(abs(r_x - prev_r) >= 22 for prev_r in cand_rels):
+                    cand_rels.append(r_x)
+                if len(cand_rels) >= 3:
+                    break
+
+            best_cut_rel = cand_rels[0]
+            best_total_cost = 1e9
+
+            for r_x in cand_rels:
+                cut_abs = ux + r_x
+                m1 = np.zeros_like(u_mask)
+                m2 = np.zeros_like(u_mask)
+                m1[uy:uy + uh, ux:cut_abs] = u_mask[uy:uy + uh, ux:cut_abs]
+                m2[uy:uy + uh, cut_abs:ux + uw] = u_mask[uy:uy + uh, cut_abs:ux + uw]
+                if not np.any(m1) or not np.any(m2):
+                    continue
+                g1_raw, c1 = viet_pred.predict_with_conf(_crop_block_pil(m1, ux, uy, max(1, cut_abs - ux), uh))
+                g2_raw, c2 = viet_pred.predict_with_conf(_crop_block_pil(m2, cut_abs, uy, max(1, (ux + uw) - cut_abs), uh))
+                g1 = _clean_base(g1_raw)
+                g2 = _clean_base(g2_raw)
+
+                len_err = abs(len(g1) - len(exp1)) + abs(len(g2) - len(exp2))
+                exact_bonus = (1.5 if g1 == exp1 else 0.0) + (1.5 if g2 == exp2 else 0.0)
+                prefix_bonus = (0.6 if (g1[:1] == exp1[:1] and g2[:1] == exp2[:1]) else 0.0)
+                v_score = float(valley_scores[r_x - s_x1])
+                total_cost = v_score * 1.4 + len_err * 0.85 - exact_bonus - prefix_bonus - 0.25 * (c1 + c2)
+                if total_cost < best_total_cost:
+                    best_total_cost = total_cost
+                    best_cut_rel = r_x
+
+            cut_abs = ux + best_cut_rel
+            m1 = np.zeros_like(u_mask)
+            m2 = np.zeros_like(u_mask)
+            m1[uy:uy + uh, ux:cut_abs] = u_mask[uy:uy + uh, ux:cut_abs]
+            m2[uy:uy + uh, cut_abs:ux + uw] = u_mask[uy:uy + uh, cut_abs:ux + uw]
+            if np.any(m1) and np.any(m2):
+                ys1, xs1 = np.where(m1)
+                ys2, xs2 = np.where(m2)
+                b1["mask"] = m1
+                b1["x"], b1["y"] = int(xs1.min()), int(ys1.min())
+                b1["w"], b1["h"] = int(xs1.max() - b1["x"] + 1), int(ys1.max() - b1["y"] + 1)
+                b1["cx"], b1["cy"] = float(xs1.mean()), float(ys1.mean())
+
+                b2["mask"] = m2
+                b2["x"], b2["y"] = int(xs2.min()), int(ys2.min())
+                b2["w"], b2["h"] = int(xs2.max() - b2["x"] + 1), int(ys2.max() - b2["y"] + 1)
+                b2["cx"], b2["cy"] = float(xs2.mean()), float(ys2.mean())
+
+        return aligned_ln
+
     def _detect_blocks(self, split_pinch: bool = True):
         from PIL import Image
         a = self.alpha
@@ -1005,26 +1163,31 @@ class ImageClusterState:
             f_area = int(np.sum((lw[y:y + h, x:x + w] == i) & (face_bin[y:y + h, x:x + w] > 0)))
             f_sol = f_area / float(max(1, w * h))
             if 1000 <= area < 14000 and w < 185 and h < 230 and f_sol <= 0.36 and 0.65 <= (w / float(max(1, h))) <= 1.32:
-                # Ensure it is not a letter (like 'Y', 'C', 'V') sitting on the exact same top & bottom baseline as adjacent letters
-                same_baseline_peers = 0
-                for j in range(1, nw):
-                    if j == i:
+                m_sub_w = (lw[y:y + h, x:x + w] == i).astype(np.uint8)
+                cnts_w, _ = cv2.findContours(m_sub_w, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                hull_aw = cv2.contourArea(cv2.convexHull(cnts_w[0])) if cnts_w else float(area)
+                hull_sol_w = area / float(max(1.0, hull_aw))
+                if hull_sol_w <= 0.72:
+                    # Ensure it is not a letter (like 'Y', 'C', 'V') sitting on the exact same top & bottom baseline as adjacent letters
+                    same_baseline_peers = 0
+                    for j in range(1, nw):
+                        if j == i:
+                            continue
+                        ox, oy, ow, oh, oarea = sw[j]
+                        if oh >= 55 and oarea >= 2600:
+                            h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
+                            if abs(y - oy) <= 10 and abs((y + h) - (oy + oh)) <= 10 and h_gap <= 180:
+                                same_baseline_peers += 1
+                    if same_baseline_peers == 0:
+                        norm_gray[y:y + h, x:x + w][lw[y:y + h, x:x + w] == i] = 255
+                        icon_seeds.append({
+                            "mask": (lw == i),
+                            "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                            "body_y": int(y), "body_h": int(h), "body_cy": float(cw[i][1]),
+                            "cx": float(cw[i][0]), "cy": float(cw[i][1]),
+                            "text": "✨", "is_icon": True
+                        })
                         continue
-                    ox, oy, ow, oh, oarea = sw[j]
-                    if oh >= 55 and oarea >= 2600:
-                        h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
-                        if abs(y - oy) <= 10 and abs((y + h) - (oy + oh)) <= 10 and h_gap <= 180:
-                            same_baseline_peers += 1
-                if same_baseline_peers == 0:
-                    norm_gray[y:y + h, x:x + w][lw[y:y + h, x:x + w] == i] = 255
-                    icon_seeds.append({
-                        "mask": (lw == i),
-                        "x": int(x), "y": int(y), "w": int(w), "h": int(h),
-                        "body_y": int(y), "body_h": int(h), "body_cy": float(cw[i][1]),
-                        "cx": float(cw[i][0]), "cy": float(cw[i][1]),
-                        "text": "✨", "is_icon": True
-                    })
-                    continue
 
             raw_blobs.append({
                 "id": i,
@@ -1035,26 +1198,53 @@ class ImageClusterState:
                 "area": int(area), "f_sol": f_sol
             })
 
-        # Select main word/character bodies: either standard word-seed size OR part of a >=3-letter collinear subtitle row
+        viet_pred = get_vietocr_predictor()
+
+        # Select main word/character bodies: standard word-seed size, collinear subtitle row, OR AI-verified medium-height word
         std_seed_h = max(48, min(85, int(self.h * 0.14)))
         std_seed_area = max(2500, min(7000, int(self.h * self.w * 0.012)))
         bodies = []
         for b in raw_blobs:
+            if b["f_sol"] < 0.22:
+                continue
+            collinear_peers = sum(
+                1 for o in raw_blobs
+                if o is not b and o["h"] >= 50 and o["area"] >= 2400 and o["f_sol"] >= 0.22
+                and abs(b["y"] - o["y"]) <= 16 and abs(b["h"] - o["h"]) <= 22
+            )
+            is_cand = False
+            needs_ai_check = False
             if b["h"] >= std_seed_h and b["area"] >= std_seed_area:
+                is_cand = True
+                if collinear_peers == 0 and b["area"] < 12000 and b["h"] < std_seed_h * 1.15:
+                    needs_ai_check = True
+            elif b["h"] >= 50 and b["area"] >= 2400 and collinear_peers >= 2:
+                is_cand = True
+            elif b["h"] >= 45 and b["area"] >= 3500 and b["w"] >= b["h"] * 1.15 and b["f_sol"] >= 0.32:
+                is_cand = True
+                if collinear_peers == 0:
+                    needs_ai_check = True
+
+            if is_cand and needs_ai_check and viet_pred is not None:
+                # Ask AI (VietOCR) whether this isolated medium-height blob is real text or a background decoration
+                bx, by, bw_b, bh_b = b["x"], b["y"], b["w"], b["h"]
+                cx1, cy1 = max(0, bx - 10), max(0, by - 25)
+                cx2, cy2 = min(self.w, bx + bw_b + 10), min(self.h, by + bh_b + 15)
+                crop_b = Image.fromarray(cv2.cvtColor(norm_gray[cy1:cy2, cx1:cx2], cv2.COLOR_GRAY2RGB))
+                ai_txt, ai_conf = viet_pred.predict_with_conf(crop_b)
+                alnum_txt = re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", ai_txt or "")
+                if ai_conf < 0.48 or len(alnum_txt) == 0:
+                    face_bin[b["mask"]] = 0
+                    norm_gray[b["mask"]] = 255
+                    continue
+
+            if is_cand:
                 bodies.append(b)
-            elif b["h"] >= 55 and b["area"] >= 2600:
-                collinear_peers = sum(
-                    1 for o in raw_blobs
-                    if o is not b and o["h"] >= 55 and o["area"] >= 2600
-                    and abs(b["y"] - o["y"]) <= 12 and abs(b["h"] - o["h"]) <= 16
-                )
-                if collinear_peers >= 3:
-                    bodies.append(b)
 
         # Attach narrow same-line punctuation/stems (e.g. '!', '?' next to 'TRỘI!' where area < std_seed_area) directly into their adjacent word body
         body_ids = set(id(b) for b in bodies)
         for b in raw_blobs:
-            if id(b) in body_ids:
+            if id(b) in body_ids or b["f_sol"] < 0.22:
                 continue
             if b["h"] >= std_seed_h * 0.65 and b["area"] >= 1800:
                 for parent in bodies:
@@ -1071,27 +1261,28 @@ class ImageClusterState:
                         body_ids.add(id(b))
                         break
 
-        # Merge oversized diacritic hats (e.g. 'Ể', 'Ố' on giant 3D titles where parent body_h >= 200) into parent word
+        # Merge oversized diacritic hats (e.g. 'Ể', 'Ố', 'Ẩ', 'Ế' on 3D titles) into parent word below them
         bodies.sort(key=lambda b: b["h"], reverse=True)
         seeds = []
         for b in bodies:
             is_hat = False
-            has_row_peer = any(
-                o is not b and 0.72 <= (o["h"] / float(max(1, b["h"]))) <= 1.38
-                and abs(o["cy"] - b["cy"]) <= max(b["h"], o["h"]) * 0.45
-                for o in bodies
+            # A full word sitting on a multi-word text line (with >=1 large word peer at the same y) is not a diacritic hat
+            large_row_peers = sum(
+                1 for o in bodies
+                if o is not b and o["area"] >= 9500 and o["h"] >= 72
+                and abs(o["body_cy"] - b["body_cy"]) <= max(b["h"], o["h"]) * 0.35
             )
-            if not has_row_peer:
+            if b["h"] <= 140 and b["area"] <= 12500 and large_row_peers == 0:
                 for parent in seeds:
                     ov_x = max(0, min(b["x"] + b["w"], parent["x"] + parent["w"]) - max(b["x"], parent["x"]))
                     v_gap_above = parent["body_y"] - (b["y"] + b["h"])
                     if (
-                        parent["body_h"] >= 200 and
-                        b["h"] <= parent["body_h"] * 0.48 and
-                        b["w"] <= parent["body_h"] * 0.90 and
-                        b["area"] <= parent["area"] * 0.18 and
-                        ov_x >= b["w"] * 0.50 and
-                        -20 <= v_gap_above <= parent["body_h"] * 0.30
+                        parent["body_h"] >= max(145, int(b["h"] * 1.55)) and
+                        b["h"] <= parent["body_h"] * 0.50 and
+                        b["w"] <= parent["body_h"] * 1.05 and
+                        b["area"] <= parent["area"] * 0.22 and
+                        ov_x >= b["w"] * 0.45 and
+                        -25 <= v_gap_above <= parent["body_h"] * 0.32
                     ):
                         parent["mask"] = parent["mask"] | b["mask"]
                         nx1 = min(parent["x"], b["x"])
@@ -1121,6 +1312,10 @@ class ImageClusterState:
                 if is_diacritic:
                     continue
                 m_sub_c = (lc_raw[y:y + h, x:x + w] == i).astype(np.uint8)
+                cnts_c, _ = cv2.findContours(m_sub_c, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                hull_ac = cv2.contourArea(cv2.convexHull(cnts_c[0])) if cnts_c else float(area)
+                if (area / float(max(1.0, hull_ac))) > 0.72:
+                    continue
                 sym_hc = np.sum(m_sub_c & np.fliplr(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.fliplr(m_sub_c))))
                 sym_vc = np.sum(m_sub_c & np.flipud(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.flipud(m_sub_c))))
                 if sym_hc < 0.42 or sym_vc < 0.42:
@@ -1162,16 +1357,19 @@ class ImageClusterState:
         hint_words = [w.upper() for w in re.findall(r"[A-Za-zÀ-ỹ0-9]+", fname_clean)]
 
         line_crops = []
-        for ln in lines:
+        for li_c, ln in enumerate(lines):
             ln.sort(key=lambda c: c["x"])
             x1 = max(0, min(c["x"] for c in ln) - 15)
-            y1 = max(0, min(c["body_y"] for c in ln) - 55)
+            hat_pad = 55 if self.h >= 450 else 12
+            y1 = max(0, min(min(c["y"], c["body_y"] - hat_pad) for c in ln) - 15)
+            if self.h < 450 and li_c > 0:
+                prev_y2 = max(c["body_y"] + c["body_h"] for c in lines[li_c - 1])
+                y1 = max(y1, prev_y2)
             x2 = min(self.w, max(c["x"] + c["w"] for c in ln) + 15)
-            y2 = min(self.h, max(c["body_y"] + c["body_h"] for c in ln) + 28)
+            y2 = min(self.h, max(max(c["y"] + c["h"], c["body_y"] + c["body_h"]) for c in ln) + 28)
             crop = cv2.cvtColor(norm_gray[y1:y2, x1:x2], cv2.COLOR_GRAY2RGB)
             line_crops.append(Image.fromarray(crop))
 
-        viet_pred = get_vietocr_predictor()
         if viet_pred is not None and line_crops:
             try:
                 raw_preds = viet_pred.predict_batch(line_crops)
@@ -1186,6 +1384,7 @@ class ImageClusterState:
         for li, ln in enumerate(lines):
             words_li = cleaned_lines[li] if (li < len(cleaned_lines) and cleaned_lines[li]) else [f"Chữ {j + 1}" for j in range(len(ln))]
             aligned_ln = self._align_line_blobs_to_words(ln, words_li, face_bin, core)
+            aligned_ln = self._verify_and_refine_line_words(aligned_ln, words_li, norm_gray, face_bin, core, viet_pred)
             ordered_lines.append(aligned_ln)
 
         # Attach icons to their nearest line
@@ -1217,9 +1416,16 @@ class ImageClusterState:
                 cx1, cy1, cw_c, ch_c, carea = sw[comp_i]
                 if carea < 45:
                     continue
-                cmask_i = (lw == comp_i)
+                cmask_i = (lw == comp_i) & (face_bin > 0)
+                if not np.any(cmask_i):
+                    continue
+                # Skip hollow background arcs or large non-diacritic background elements
+                f_sol_c = int(np.sum(cmask_i)) / float(max(1, cw_c * ch_c))
+                if f_sol_c < 0.22 and carea > 1200:
+                    continue
+                cmask_w = (lw == comp_i)
                 # Skip if already mostly assigned to a seed or icon
-                if np.mean(seed_map[cmask_i] > 0) >= 0.45:
+                if np.mean(seed_map[cmask_w] > 0) >= 0.45:
                     continue
                 ccx, ccy = float(cw[comp_i][0]), float(cw[comp_i][1])
                 best_item = None
@@ -1227,41 +1433,49 @@ class ImageClusterState:
                 for w_item in text_items:
                     wx1, wy1, ww_w, wh_w = w_item["x"], w_item["y"], w_item["w"], w_item["h"]
                     h_dist = max(0.0, float(max(cx1 - (wx1 + ww_w), wx1 - (cx1 + cw_c))))
+                    h_ov = max(0.0, float(min(cx1 + cw_c, wx1 + ww_w) - max(cx1, wx1)))
+                    h_ov_frac = h_ov / float(max(1, cw_c))
                     v_ov = max(0, min(cy1 + ch_c, wy1 + wh_w) - max(cy1, wy1))
                     if v_ov >= ch_c * 0.35:
-                        # Same horizontal line (e.g. '!', '?', '.', or broken stroke)
-                        cost = h_dist * 1.15 + abs(ccy - w_item["cy"]) * 0.25
+                        # Same horizontal line (e.g. '!', '?', '.', or broken stroke) -> must be horizontally adjacent
+                        if h_dist > max(38.0, wh_w * 0.35):
+                            continue
+                        cost = h_dist * 1.15 + abs(ccy - w_item["cy"]) * 0.25 - h_ov_frac * 35.0
                     elif (cy1 + ch_c) <= (wy1 + 18):
                         # Component is ABOVE w_item -> Vietnamese upper diacritic (^, ´, `, ?, ~, ˘)
                         v_gap_above = max(0.0, float(wy1 - (cy1 + ch_c)))
-                        cost = v_gap_above * 1.0 + h_dist * 2.2
+                        if h_dist > 24.0 or v_gap_above > max(58.0, wh_w * 0.42):
+                            continue
+                        cost = v_gap_above * 1.0 + h_dist * 2.5 - h_ov_frac * 65.0
                     else:
                         # Component is BELOW w_item -> Only valid if it is a compact dot (dấu nặng '.' or dot of '!'/'?')
                         v_gap_below = max(0.0, float(cy1 - (wy1 + wh_w)))
+                        if h_dist > 20.0 or v_gap_below > max(38.0, wh_w * 0.26):
+                            continue
                         is_compact_dot = (
                             cw_c <= max(45, int(wh_w * 0.45)) and
                             ch_c <= max(42, int(wh_w * 0.38)) and
-                            (cw_c / float(max(1, ch_c))) <= 1.85 and
-                            v_gap_below <= max(36.0, wh_w * 0.22)
+                            (cw_c / float(max(1, ch_c))) <= 1.85
                         )
                         if is_compact_dot:
-                            cost = v_gap_below * 1.15 + h_dist * 2.2
+                            cost = v_gap_below * 1.15 + h_dist * 2.5 - h_ov_frac * 65.0
                         else:
-                            # Penalize heavily so upper line never steals lower line's wide diacritic hat or '!' stem
-                            cost = v_gap_below * 3.5 + h_dist * 2.5 + 450.0
+                            continue
                     if cost < best_cost:
                         best_cost = cost
                         best_item = w_item
                 if best_item is not None:
-                    unassigned = cmask_i & (seed_map == 0)
+                    unassigned = cmask_w & (seed_map == 0)
                     seed_map[unassigned] = best_item["final_id"]
                     best_item["mask"] = best_item["mask"] | unassigned
 
         if ordered_items:
-            # Use sampling=(1.2, 1.0) so outer 3D strokes/extrusion prefer horizontal same-line connection over jumping across lines
-            _, inds = distance_transform_edt(seed_map == 0, sampling=(1.2, 1.0), return_indices=True)
+            # Use sampling=(1.2, 1.0) and bound 3D stroke propagation distance so distant background graphics (e.g. neon rings) are not absorbed
+            dist_to_seed, inds = distance_transform_edt(seed_map == 0, sampling=(1.2, 1.0), return_indices=True)
             nearest_seed = seed_map[inds[0], inds[1]]
-            self.label_map = np.where(core > 0, nearest_seed, 0).astype(np.int32)
+            med_h = float(np.median([b["h"] for b in ordered_items if not b.get("is_icon")] or [100.0]))
+            max_stroke_dist = max(32.0, min(58.0, med_h * 0.42))
+            self.label_map = np.where((core > 0) & (dist_to_seed <= max_stroke_dist), nearest_seed, 0).astype(np.int32)
         else:
             self.label_map = np.zeros((self.h, self.w), dtype=np.int32)
 
@@ -1273,6 +1487,8 @@ class ImageClusterState:
             if len(xs) == 0:
                 mask_b = b["mask"]
                 ys, xs = np.where(mask_b)
+            if len(xs) == 0:
+                continue
             bx, by = int(xs.min()), int(ys.min())
             bw, bh = int(xs.max() - bx + 1), int(ys.max() - by + 1)
             cnts, _ = cv2.findContours(mask_b.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
