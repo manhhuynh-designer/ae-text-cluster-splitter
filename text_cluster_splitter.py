@@ -317,7 +317,7 @@ VN_WORD_FIXES = {
     "CHONG": "CHÓNG", "CHỐNG": "CHÓNG", "KIP": "KỊP",
     "ĐÔ": "ĐỒ", "ĐỐ": "ĐỒ", "ĐỔ": "ĐỒ", "ĐỖ": "ĐỒ",
     "VỚ": "VỚI", "GIẶI": "GIẶT", "GIAT": "GIẶT", "NHẠNH": "NHANH",
-    "AO": "ÁO", "ĐE": "ĐỂ", "ĐỀ": "ĐỂ", "CO": "CÓ",
+    "AO": "ÁO", "ĐE": "ĐỂ", "ĐỀ": "ĐỂ", "ĐÊ": "ĐỂ", "CO": "CÓ",
     "PHỐT": "PHÚT", "PHOT": "PHÚT", "PHUT": "PHÚT", "CUNG": "CỨNG",
     "ĐÀI": "DÀI", "TỐO": "TỐC", "TOO": "TỐC", "TOC": "TỐC",
     "HOI": "HÔI", "MOC": "MỐC", "MOCI": "MỐC!", "MỐCI": "MỐC!", "LAU": "LÂU", "SACH": "SẠCH",
@@ -329,6 +329,9 @@ VN_WORD_FIXES = {
     "TUC": "TỨC", "THI": "THÌ", "CONG": "CÔNG", "NGHE": "NGHỆ",
     "DOC": "ĐỘC", "QUYEN": "QUYỀN", "MOT": "MỘT", "MA": "MÀ", "VA": "VÀ",
     "SIỀU": "SIÊU", "SIEU": "SIÊU", "ĐẮM": "ĐẪM",
+    "GIAY": "GIẤY", "QUY": "QUỲ", "TIM": "TÍM", "DIU": "DỊU", "NHE": "NHẸ",
+    "CHAC": "CHẮC", "LANH": "LÀNH", "TINH": "TÍNH", "TIN": "TÍN", "HOC": "HỌC",
+    "LÊU": "YÊU?", "LEU": "YÊU?", "CẬN": "CẶN", "CAN": "CẦN", "DỊNH": "DÍNH",
 }
 
 VIETOCR_VOCAB_CHARS = (
@@ -453,6 +456,7 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
     s = re.sub(r"(\d+)([A-ZÀ-Ỹ]+)", r"\1 \2", s)
     s = re.sub(r"(OMO)([A-ZÀ-Ỹ]+)", r"\1 \2", s)
     s = re.sub(r"([A-ZÀ-Ỹ]+)(OMO)", r"\1 \2", s)
+    s = re.sub(r"(C[ẶẬA]N)(B[ỌO]T)", r"\1 \2", s)
     tokens = [t for t in re.split(r"\s+", s) if t]
     out_tokens = []
     for t in tokens:
@@ -495,12 +499,18 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
                 if hw != hw_base:
                     core_w = hw
                 break
-            elif len(base) >= 3 and len(hw_base) == len(base) and sum(c1 != c2 for c1, c2 in zip(hw_base, base)) <= 1:
+            elif len(base) >= 3 and len(hw_base) == len(base) and hw_base[0] == base[0] and sum(c1 != c2 for c1, c2 in zip(hw_base, base)) <= 1:
                 core_w = VN_WORD_FIXES.get(hw, hw)
                 break
         if core_w in VN_WORD_FIXES:
             core_w = VN_WORD_FIXES[core_w]
         out_tokens.append(core_w + punct)
+
+    # Fold trailing 3D exclamation mark misread as a single-letter token ('V', 'I', 'Y', '1', 'L') into the preceding word
+    if len(out_tokens) >= 2 and out_tokens[-1] in ("V", "I", "Y", "1", "L") and strip_accents(out_tokens[-2]) in ("TAT", "LO", "CHAM", "DONG"):
+        out_tokens.pop()
+        if not out_tokens[-1].endswith("!"):
+            out_tokens[-1] += "!"
 
     # Second pass: check if any 2 adjacent OCR tokens have a shifted boundary vs 2 consecutive hint words (e.g. "DỄH II" vs "DE HOI")
     if len(out_tokens) >= 2 and len(hint_words) >= 2:
@@ -513,7 +523,7 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
             for i in range(len(hint_words) - 1):
                 hw1, hw2 = hint_words[i], hint_words[i + 1]
                 hb12 = strip_accents(hw1) + strip_accents(hw2)
-                if len(b12) >= 4 and len(b12) == len(hb12) and sum(c1 != c2 for c1, c2 in zip(b12, hb12)) <= 1:
+                if len(b12) >= 4 and len(b12) == len(hb12) and b12[0] == hb12[0] and sum(c1 != c2 for c1, c2 in zip(b12, hb12)) <= 1:
                     out_tokens[k] = VN_WORD_FIXES.get(hw1, hw1)
                     out_tokens[k + 1] = VN_WORD_FIXES.get(hw2, hw2) + p2
                     replaced = True
@@ -526,6 +536,14 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
         ("DE", "LÂU"): ("ĐỂ", "LÂU"),
         ("DE", "HÔI"): ("DỄ", "HÔI"),
         ("BỌT", "LẦN"): ("MỘT", "LẦN"),
+        ("CHẲNG", "ĐỢI"): ("CHÀNG", "ĐỢI"),
+        ("CÓ", "CHA"): ("CÓ", "CHẮC"),
+        ("DI", "HỌC"): ("ĐI", "HỌC"),
+        ("DI", "HOC"): ("ĐI", "HỌC"),
+        ("TỰ", "TÍN"): ("TỰ", "TIN"),
+        ("THỨ", "NGHIỆM"): ("THỬ", "NGHIỆM"),
+        ("Ó", "CHẮC"): ("CÓ", "CHẮC"),
+        ("BÊ", "YÊU"): ("BÉ", "YÊU"),
     }
     for k in range(len(out_tokens) - 1):
         w1 = re.sub(r"[^A-Za-zÀ-ỹ0-9]", "", out_tokens[k])
@@ -791,21 +809,26 @@ class ImageClusterState:
 
     def _detect_blocks_scaled(self, split_pinch: bool = True, target_text_h: float = 140.0):
         """Runs `_detect_blocks` at a normalized working resolution. Detection thresholds are tuned for letters
-        roughly 80-300 px tall, so when the native pass finds only small letters (e.g. 512 px lockups), the layer is
-        upscaled so letters reach ~`target_text_h` px, detected again, and the label map is mapped back to native
-        resolution so masks still align pixel-perfectly with the AE layer."""
-        self._detect_blocks(split_pinch=split_pinch)
+        roughly 80-300 px tall, so huge 4K/8K/11K layers are downscaled to ~1600 px and tiny layers (<80 px letters)
+        are upscaled, then the label map is mapped back to native resolution so masks align pixel-perfectly."""
         max_dim = max(self.w, self.h)
-        txt_h = [b["h"] for b in self.blocks if not b.get("is_icon")]
-        med_h = float(np.median(txt_h)) if txt_h else 0.0
-        if max_dim < 32 or max_dim >= 1600 or (med_h >= 80.0):
-            return
-        s = target_text_h / med_h if med_h > 0 else 2.5
-        s = max(1.5, min(4.0, s, 2400.0 / max_dim))
-        if s < 1.2:
-            return
+        s = 1.0
+        if max_dim > 2400:
+            s = 1600.0 / float(max_dim)
+        else:
+            self._detect_blocks(split_pinch=split_pinch)
+            txt_h = [b["h"] for b in self.blocks if not b.get("is_icon")]
+            med_h = float(np.median(txt_h)) if txt_h else 0.0
+            if max_dim < 32 or max_dim >= 1600 or (med_h >= 80.0):
+                return
+            s = target_text_h / med_h if med_h > 0 else 2.5
+            s = max(1.5, min(4.0, s, 2400.0 / max_dim))
+            if s < 1.2:
+                return
+
         orig = (self.img_bgra, self.alpha, self.w, self.h)
-        up = cv2.resize(self.img_bgra, (int(round(self.w * s)), int(round(self.h * s))), interpolation=cv2.INTER_CUBIC)
+        interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC
+        up = cv2.resize(self.img_bgra, (int(round(self.w * s)), int(round(self.h * s))), interpolation=interp)
         self.img_bgra = up
         self.alpha = up[:, :, 3]
         self.h, self.w = up.shape[:2]
@@ -821,9 +844,14 @@ class ImageClusterState:
             return cv2.resize(m.astype(np.int32 if m.dtype != np.uint8 else np.uint8), (self.w, self.h), interpolation=cv2.INTER_NEAREST) if m is not None else None
 
         self.label_map = cv2.resize(up_label.astype(np.float32), (self.w, self.h), interpolation=cv2.INTER_NEAREST).astype(np.int32)
+        if s < 1.0:
+            nat_thresh = max(180, int(self.alpha.max()) - 25) if self.alpha.size > 0 else 200
+            self.label_map[self.alpha < nat_thresh] = 0
         self.face_bin = _down(up_face)
         self.core_mask = _down(up_core)
         new_blocks = []
+        min_cnt_area = max(8, int(round(8.0 / (s * s))))
+        approx_eps = max(1.5, round(1.5 / s, 1))
         for b in self.blocks:
             mask_b = self.label_map == b["id"]
             ys, xs = np.where(mask_b)
@@ -833,8 +861,8 @@ class ImageClusterState:
             cnts, _ = cv2.findContours(mask_b.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             polys = []
             for cnt in cnts:
-                if cv2.contourArea(cnt) >= 8:
-                    approx = cv2.approxPolyDP(cnt, 1.5, True)
+                if cv2.contourArea(cnt) >= min_cnt_area:
+                    approx = cv2.approxPolyDP(cnt, approx_eps, True)
                     polys.append([[int(p[0][0]), int(p[0][1])] for p in approx])
             nb = dict(b)
             nb.update({
@@ -1194,59 +1222,92 @@ class ImageClusterState:
         self.core_mask = core
         dist = cv2.distanceTransform(core, cv2.DIST_L2, 5)
 
-        # 2. Spatially adaptive polarity normalization (extracts inner letter face regardless of white-on-blue or blue-on-white 3D style)
-        inner_core = (dist >= 4).astype(np.uint8)
-        deep_mask = (dist >= 6).astype(np.float32)
-        local_inner_lum = cv2.blur(lum * deep_mask, (121, 81)) / (cv2.blur(deep_mask, (121, 81)) + 1e-5)
-        bright_face = np.clip((lum - 145.0) / 75.0, 0.0, 1.0)
-        dark_face = np.clip((145.0 - lum) / 70.0, 0.0, 1.0)
-        face = np.where(local_inner_lum > 145.0, bright_face, dark_face) * inner_core
-        norm_gray = (255.0 * (1.0 - face)).astype(np.uint8)
+        # 2. Spatially adaptive polarity normalization (extracts inner letter face regardless of white-on-blue, cyan-on-blue, or flat 2D vector style)
+        core_lums = lum[core > 0]
+        if core_lums.size > 100:
+            p10_l, p90_l = np.percentile(core_lums, [10, 90])
+            is_flat_mono = bool((p90_l - p10_l) < 25.0)
+        else:
+            is_flat_mono = False
+
+        if is_flat_mono:
+            face_bin = (a >= 128).astype(np.uint8)
+            norm_gray = (255 - a).astype(np.uint8)
+            min_f_sol = 0.10
+        else:
+            inner_core = (dist >= 4).astype(np.uint8)
+            deep_mask = (dist >= 6).astype(np.float32)
+            rim_mask = ((dist >= 1) & (dist <= 4)).astype(np.float32)
+            local_inner_lum = cv2.blur(lum * deep_mask, (121, 81)) / (cv2.blur(deep_mask, (121, 81)) + 1e-5)
+            local_rim_lum = cv2.blur(lum * rim_mask, (121, 81)) / (cv2.blur(rim_mask, (121, 81)) + 1e-5)
+            is_colored_bright = (local_inner_lum > local_rim_lum + 35.0) & (local_rim_lum < 112.0)
+            thr_lo = np.where(is_colored_bright, 125.0, 145.0)
+            span_b = np.where(is_colored_bright, 60.0, 75.0)
+            bright_face = np.clip((lum - thr_lo) / span_b, 0.0, 1.0)
+            dark_face = np.clip((145.0 - lum) / 70.0, 0.0, 1.0)
+            face = np.where(local_inner_lum > 145.0, bright_face, dark_face) * inner_core
+            norm_gray = (255.0 * (1.0 - face)).astype(np.uint8)
+            face_bin = (norm_gray < 140).astype(np.uint8)
+            min_f_sol = 0.22
+
+            # Strip horizontal optical lens-flare streaks, thin specular lines, and hollow 3D bevel highlight arcs
+            nf_cln, lf_cln, sf_cln, _ = cv2.connectedComponentsWithStats(face_bin)
+            for i_c in range(1, nf_cln):
+                xc, yc, wc, hc, ac = sf_cln[i_c]
+                sol_c = ac / float(max(1, wc * hc))
+                if (
+                    (wc / float(max(1, hc)) >= 4.0 and hc <= max(28, int(self.h * 0.032))) or
+                    (hc <= max(12, int(self.h * 0.014)) and wc / float(max(1, hc)) >= 2.2) or
+                    (sol_c < 0.21 and ac < 3500 and max(wc, hc) >= 28)
+                ):
+                    face_bin[lf_cln == i_c] = 0
+                    norm_gray[lf_cln == i_c] = 255
 
         # 3. Detect character/word blobs, attach large 3D diacritics, and filter 4-pointed star icons
-        face_bin = (norm_gray < 140).astype(np.uint8)
         self.face_bin = face_bin.copy()
 
         icon_seeds = []
         # 3A. Pre-filter 4-pointed star icons directly on undilated face_bin so stars close to text never fuse during w_bin dilation
-        nf0, lf0, sf0, cf0 = cv2.connectedComponentsWithStats(face_bin)
-        for i in range(1, nf0):
-            x, y, w, h, area = sf0[i]
-            if not (900 <= area < 16000 and w < 195 and h < 240 and 0.62 <= (w / float(max(1, h))) <= 1.38):
-                continue
-            box_sol = area / float(max(1, w * h))
-            if box_sol > 0.43:
-                continue
-            m_sub = (lf0[y:y + h, x:x + w] == i).astype(np.uint8)
-            cnts_i, _ = cv2.findContours(m_sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            hull_a = cv2.contourArea(cv2.convexHull(cnts_i[0])) if cnts_i else float(area)
-            hull_sol = area / float(max(1.0, hull_a))
-            if hull_sol > 0.71:
-                continue
-            sym_h = np.sum(m_sub & np.fliplr(m_sub)) / float(max(1, np.sum(m_sub | np.fliplr(m_sub))))
-            sym_v = np.sum(m_sub & np.flipud(m_sub)) / float(max(1, np.sum(m_sub | np.flipud(m_sub))))
-            if sym_h < 0.45 or sym_v < 0.45:
-                continue
-            same_baseline_peers = 0
-            for j in range(1, nf0):
-                if j == i:
+        if not is_flat_mono:
+            nf0, lf0, sf0, cf0 = cv2.connectedComponentsWithStats(face_bin)
+            for i in range(1, nf0):
+                x, y, w, h, area = sf0[i]
+                if not (900 <= area < 16000 and w < 195 and h < 240 and 0.62 <= (w / float(max(1, h))) <= 1.38):
                     continue
-                ox, oy, ow, oh, oarea = sf0[j]
-                if oh >= 50 and oarea >= 2000:
-                    h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
-                    if abs(y - oy) <= 10 and abs((y + h) - (oy + oh)) <= 10 and h_gap <= 180:
-                        same_baseline_peers += 1
-            if same_baseline_peers == 0:
-                m_full = (lf0 == i)
-                face_bin[m_full] = 0
-                norm_gray[m_full] = 255
-                icon_seeds.append({
-                    "mask": m_full,
-                    "x": int(x), "y": int(y), "w": int(w), "h": int(h),
-                    "body_y": int(y), "body_h": int(h), "body_cy": float(cf0[i][1]),
-                    "cx": float(cf0[i][0]), "cy": float(cf0[i][1]),
-                    "text": "✨", "is_icon": True
-                })
+                box_sol = area / float(max(1, w * h))
+                if box_sol > 0.43:
+                    continue
+                m_sub = (lf0[y:y + h, x:x + w] == i).astype(np.uint8)
+                cnts_i, _ = cv2.findContours(m_sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                hull_a = cv2.contourArea(cv2.convexHull(cnts_i[0])) if cnts_i else float(area)
+                hull_sol = area / float(max(1.0, hull_a))
+                if hull_sol > 0.71:
+                    continue
+                sym_h = np.sum(m_sub & np.fliplr(m_sub)) / float(max(1, np.sum(m_sub | np.fliplr(m_sub))))
+                sym_v = np.sum(m_sub & np.flipud(m_sub)) / float(max(1, np.sum(m_sub | np.flipud(m_sub))))
+                is_tilted_star = (hull_sol <= 0.62 and box_sol <= 0.38 and min(sym_h, sym_v) >= 0.32 and max(sym_h, sym_v) >= 0.52)
+                if (sym_h < 0.45 or sym_v < 0.45) and not is_tilted_star:
+                    continue
+                same_baseline_peers = 0
+                for j in range(1, nf0):
+                    if j == i:
+                        continue
+                    ox, oy, ow, oh, oarea = sf0[j]
+                    if oh >= 50 and oarea >= 2000:
+                        h_gap = max(0, max(x - (ox + ow), ox - (x + w)))
+                        if abs(y - oy) <= 10 and abs((y + h) - (oy + oh)) <= 10 and h_gap <= 180:
+                            same_baseline_peers += 1
+                if same_baseline_peers == 0:
+                    m_full = (lf0 == i)
+                    face_bin[m_full] = 0
+                    norm_gray[m_full] = 255
+                    icon_seeds.append({
+                        "mask": m_full,
+                        "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                        "body_y": int(y), "body_h": int(h), "body_cy": float(cf0[i][1]),
+                        "cx": float(cf0[i][0]), "cy": float(cf0[i][1]),
+                        "text": "✨", "is_icon": True
+                    })
 
         w_bin = cv2.dilate(face_bin, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 5)))
         nw, lw, sw, cw = cv2.connectedComponentsWithStats(w_bin)
@@ -1258,12 +1319,14 @@ class ImageClusterState:
                 continue
             f_area = int(np.sum((lw[y:y + h, x:x + w] == i) & (face_bin[y:y + h, x:x + w] > 0)))
             f_sol = f_area / float(max(1, w * h))
-            if 1000 <= area < 14000 and w < 185 and h < 230 and f_sol <= 0.36 and 0.65 <= (w / float(max(1, h))) <= 1.32:
+            if not is_flat_mono and 1000 <= area < 14000 and w < 185 and h < 230 and f_sol <= 0.36 and 0.65 <= (w / float(max(1, h))) <= 1.32:
                 m_sub_w = (lw[y:y + h, x:x + w] == i).astype(np.uint8)
                 cnts_w, _ = cv2.findContours(m_sub_w, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 hull_aw = cv2.contourArea(cv2.convexHull(cnts_w[0])) if cnts_w else float(area)
                 hull_sol_w = area / float(max(1.0, hull_aw))
-                if hull_sol_w <= 0.72:
+                sym_hw = np.sum(m_sub_w & np.fliplr(m_sub_w)) / float(max(1, np.sum(m_sub_w | np.fliplr(m_sub_w))))
+                sym_vw = np.sum(m_sub_w & np.flipud(m_sub_w)) / float(max(1, np.sum(m_sub_w | np.flipud(m_sub_w))))
+                if hull_sol_w <= 0.72 and sym_hw >= 0.42 and sym_vw >= 0.42:
                     # Ensure it is not a letter (like 'Y', 'C', 'V') sitting on the exact same top & bottom baseline as adjacent letters
                     same_baseline_peers = 0
                     for j in range(1, nw):
@@ -1275,6 +1338,7 @@ class ImageClusterState:
                             if abs(y - oy) <= 10 and abs((y + h) - (oy + oh)) <= 10 and h_gap <= 180:
                                 same_baseline_peers += 1
                     if same_baseline_peers == 0:
+                        face_bin[lw == i] = 0
                         norm_gray[y:y + h, x:x + w][lw[y:y + h, x:x + w] == i] = 255
                         icon_seeds.append({
                             "mask": (lw == i),
@@ -1301,39 +1365,39 @@ class ImageClusterState:
         std_seed_area = max(2500, min(7000, int(self.h * self.w * 0.012)))
         bodies = []
         for b in raw_blobs:
-            if b["f_sol"] < 0.22:
+            if b["f_sol"] < min_f_sol:
                 continue
             collinear_peers = sum(
                 1 for o in raw_blobs
-                if o is not b and o["h"] >= 50 and o["area"] >= 2400 and o["f_sol"] >= 0.22
+                if o is not b and o["h"] >= 50 and o["area"] >= 2400 and o["f_sol"] >= min_f_sol
                 and abs(b["y"] - o["y"]) <= 16 and abs(b["h"] - o["h"]) <= 22
             )
             is_cand = False
             needs_ai_check = False
             if b["h"] >= std_seed_h and b["area"] >= std_seed_area:
                 is_cand = True
-                if collinear_peers == 0 and b["area"] < 12000 and b["h"] < std_seed_h * 1.15:
+                if not is_flat_mono and collinear_peers == 0 and b["area"] < 12000 and b["h"] < std_seed_h * 1.15:
                     needs_ai_check = True
             elif b["h"] >= 50 and b["area"] >= 2400 and collinear_peers >= 2:
                 is_cand = True
             elif b["h"] >= 45 and b["area"] >= 3500 and b["w"] >= b["h"] * 1.15 and b["f_sol"] >= 0.32:
                 is_cand = True
-                if collinear_peers == 0:
+                if not is_flat_mono and collinear_peers == 0:
                     needs_ai_check = True
 
-            if is_cand and needs_ai_check:
+            if is_cand and b["h"] < 85 and b["area"] < 8000:
                 # A blob hugging the top/bottom of a much taller text blob is a diacritic (e.g. the stacked
-                # '^' + '`' of 'Ồ', 'Ầ', 'Ề'), not a word and not a background decoration: skip the AI check, let
-                # the hat merger below (merged into the word under it), and never erase it as background.
+                # '^' + '`' of 'Ồ', 'Ầ', 'Ề', or upper diacritics on 4K flat text), not a word: skip AI check,
+                # mark as diacritic so it attaches to the letter below it in step 6.
                 is_mark = False
                 for o in raw_blobs:
-                    if o is b or o["h"] < b["h"] * 1.8 or o["f_sol"] < 0.22:
+                    if o is b or o["h"] < max(95, b["h"] * 1.8) or o["f_sol"] < min_f_sol:
                         continue
-                    if b["w"] > o["w"] * 0.6 or b["area"] > o["area"] * 0.3:
+                    if b["w"] > max(o["w"] * 0.65, 115) or b["area"] > o["area"] * 0.35:
                         continue
                     ov_x = max(0, min(b["x"] + b["w"], o["x"] + o["w"]) - max(b["x"], o["x"]))
                     v_gap = max(b["y"] - (o["y"] + o["h"]), o["y"] - (b["y"] + b["h"]))
-                    if ov_x >= b["w"] * 0.5 and -8 <= v_gap <= max(40, int(o["h"] * 0.30)):
+                    if ov_x >= b["w"] * 0.45 and -8 <= v_gap <= max(40, int(o["h"] * 0.32)):
                         is_mark = True
                         break
                 if is_mark:
@@ -1448,39 +1512,41 @@ class ImageClusterState:
                     sd["body_h"] = min(sd["body_h"], sd["y"] + sd["h"] - sd["body_y"])
 
         # Also check raw core for any isolated 4-pointed star icons not caught in w_bin
-        nc_raw, lc_raw, sc_raw, cc_raw = cv2.connectedComponentsWithStats(core)
-        for i in range(1, nc_raw):
-            x, y, w, h, area = sc_raw[i]
-            sol = area / float(max(1, w * h))
-            if 1000 <= area < 14000 and w < 185 and h < 230 and sol <= 0.54 and 0.65 <= (w / float(max(1, h))) <= 1.28:
-                is_diacritic = False
-                for sd in seeds:
-                    ov_x = max(0, min(x + w, sd["x"] + sd["w"]) - max(x, sd["x"]))
-                    v_gap = max(0, max(y - (sd["y"] + sd["h"]), sd["y"] - (y + h)))
-                    if ov_x >= w * 0.35 and v_gap < max(65, int(sd["h"] * 0.35)):
-                        is_diacritic = True
-                        break
-                if is_diacritic:
-                    continue
-                m_sub_c = (lc_raw[y:y + h, x:x + w] == i).astype(np.uint8)
-                cnts_c, _ = cv2.findContours(m_sub_c, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                hull_ac = cv2.contourArea(cv2.convexHull(cnts_c[0])) if cnts_c else float(area)
-                if (area / float(max(1.0, hull_ac))) > 0.72:
-                    continue
-                sym_hc = np.sum(m_sub_c & np.fliplr(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.fliplr(m_sub_c))))
-                sym_vc = np.sum(m_sub_c & np.flipud(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.flipud(m_sub_c))))
-                if sym_hc < 0.42 or sym_vc < 0.42:
-                    continue
-                m_raw = (lc_raw == i)
-                if not any(np.any(m_raw & ic["mask"]) for ic in icon_seeds) and not any(np.any(m_raw & sd["mask"]) for sd in seeds):
-                    norm_gray[y:y + h, x:x + w][m_raw[y:y + h, x:x + w]] = 255
-                    icon_seeds.append({
-                        "mask": m_raw,
-                        "x": int(x), "y": int(y), "w": int(w), "h": int(h),
-                        "body_y": int(y), "body_h": int(h), "body_cy": float(cc_raw[i][1]),
-                        "cx": float(cc_raw[i][0]), "cy": float(cc_raw[i][1]),
-                        "text": "✨", "is_icon": True
-                    })
+        if not is_flat_mono:
+            nc_raw, lc_raw, sc_raw, cc_raw = cv2.connectedComponentsWithStats(core)
+            for i in range(1, nc_raw):
+                x, y, w, h, area = sc_raw[i]
+                sol = area / float(max(1, w * h))
+                if 1000 <= area < 14000 and w < 185 and h < 230 and sol <= 0.54 and 0.65 <= (w / float(max(1, h))) <= 1.28:
+                    is_diacritic = False
+                    for sd in seeds:
+                        ov_x = max(0, min(x + w, sd["x"] + sd["w"]) - max(x, sd["x"]))
+                        v_gap = max(0, max(y - (sd["y"] + sd["h"]), sd["y"] - (y + h)))
+                        if ov_x >= w * 0.35 and v_gap < max(65, int(sd["h"] * 0.35)):
+                            is_diacritic = True
+                            break
+                    if is_diacritic:
+                        continue
+                    m_sub_c = (lc_raw[y:y + h, x:x + w] == i).astype(np.uint8)
+                    cnts_c, _ = cv2.findContours(m_sub_c, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    hull_ac = cv2.contourArea(cv2.convexHull(cnts_c[0])) if cnts_c else float(area)
+                    if (area / float(max(1.0, hull_ac))) > 0.72:
+                        continue
+                    sym_hc = np.sum(m_sub_c & np.fliplr(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.fliplr(m_sub_c))))
+                    sym_vc = np.sum(m_sub_c & np.flipud(m_sub_c)) / float(max(1, np.sum(m_sub_c | np.flipud(m_sub_c))))
+                    if sym_hc < 0.42 or sym_vc < 0.42:
+                        continue
+                    m_raw = (lc_raw == i)
+                    if not any(np.any(m_raw & ic["mask"]) for ic in icon_seeds) and not any(np.any(m_raw & sd["mask"]) for sd in seeds):
+                        face_bin[m_raw] = 0
+                        norm_gray[y:y + h, x:x + w][m_raw[y:y + h, x:x + w]] = 255
+                        icon_seeds.append({
+                            "mask": m_raw,
+                            "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                            "body_y": int(y), "body_h": int(h), "body_cy": float(cc_raw[i][1]),
+                            "cx": float(cc_raw[i][0]), "cy": float(cc_raw[i][1]),
+                            "text": "✨", "is_icon": True
+                        })
 
         # 4. Group word seeds into horizontal/slanted text lines using body_cy & nearest horizontal neighbor
         seeds.sort(key=lambda s: s["body_cy"])
@@ -1536,6 +1602,7 @@ class ImageClusterState:
                 y1 = max(y1, prev_y2)
             x2 = min(self.w, max(c["x"] + c["w"] for c in ln) + 15)
             y2 = min(self.h, max(max(c["y"] + c["h"], c["body_y"] + c["body_h"], c.get("full_y2", 0)) for c in ln) + 28)
+            y1 = min(y1, max(0, y2 - 20))
             crop_g = norm_gray[y1:y2, x1:x2].copy()
             # Blank out letters that belong to OTHER lines so the OCR never reads stray strokes of the line above/below
             for lj, ln_o in enumerate(lines):
@@ -1613,89 +1680,102 @@ class ImageClusterState:
                 px, py = int(xs_p.min()), int(ys_p.min())
                 att_comps.append((part_w, (px, py, int(xs_p.max() - px + 1), int(ys_p.max() - py + 1), int(len(xs_p))),
                                   (float(xs_p.mean()), float(ys_p.mean()))))
-            for cmask_w, (cx1, cy1, cw_c, ch_c, carea), (ccx, ccy) in att_comps:
-                if carea < 45:
-                    continue
-                cmask_i = cmask_w & (face_bin > 0)
-                if not np.any(cmask_i):
-                    continue
-                # Skip hollow background arcs or large non-diacritic background elements
-                f_sol_c = int(np.sum(cmask_i)) / float(max(1, cw_c * ch_c))
-                if f_sol_c < 0.22 and carea > 1200 and (cw_c > 260 or ch_c > 160):
-                    continue
-                # Skip if already mostly assigned to a seed or icon
-                if np.mean(seed_map[cmask_w] > 0) >= 0.45:
-                    continue
-                best_item = None
-                best_cost = 1e12
-                # True pixel distance from this mark to each word's letter faces: decides ownership of marks sitting
-                # between two lines (e.g. the dot of 'Ạ' in 'SẠCH' vs the '`' of 'VÀ' just below it).
-                R = 180
-                wy0, wy1_ = max(0, cy1 - R), min(self.h, cy1 + ch_c + R)
-                wx0, wx1_ = max(0, cx1 - R), min(self.w, cx1 + cw_c + R)
-                comp_face_win = cmask_i[wy0:wy1_, wx0:wx1_]
-                # Solid round blob = dấu nặng dot (belongs to the word ABOVE it); curved/elongated marks
-                # (´ ` ~ ^ ˘ and the hook of 'ả') belong to the word BELOW them.
-                fys, fxs = np.where(cmask_i[cy1:cy1 + ch_c, cx1:cx1 + cw_c])
-                if len(fxs):
-                    fbw, fbh = int(fxs.max() - fxs.min() + 1), int(fys.max() - fys.min() + 1)
-                    is_round_dot = (len(fxs) / float(fbw * fbh) >= 0.55) and (0.55 <= fbw / float(fbh) <= 1.8)
-                else:
-                    fbw, fbh = cw_c, ch_c
-                    is_round_dot = False
-                for w_item in text_items:
-                    wx1, wy1, ww_w, wh_w = w_item["x"], w_item["y"], w_item["w"], w_item["h"]
-                    h_dist = max(0.0, float(max(cx1 - (wx1 + ww_w), wx1 - (cx1 + cw_c))))
-                    v_ov = max(0, min(cy1 + ch_c, wy1 + wh_w) - max(cy1, wy1))
-                    bias = 0.0
-                    h_ov_c = max(0, min(cx1 + cw_c, wx1 + ww_w) - max(cx1, wx1)) / float(max(1, cw_c))
-                    hangs_below = h_ov_c >= 0.5 and (cy1 + ch_c) > (wy1 + wh_w) + 4
-                    if v_ov >= ch_c * 0.35 and not hangs_below:
-                        # Same horizontal line (e.g. '!', '?', '.', or broken stroke) -> must be horizontally adjacent
-                        if h_dist > max(38.0, wh_w * 0.35):
-                            continue
-                    elif (cy1 + ch_c) <= (wy1 + 18):
-                        # Component is ABOVE w_item -> Vietnamese upper diacritic (^, ´, `, ?, ~, ˘)
-                        v_gap_above = max(0.0, float(wy1 - (cy1 + ch_c)))
-                        if h_dist > 24.0 or v_gap_above > max(58.0, wh_w * 0.42):
-                            continue
-                        if is_round_dot:
-                            bias = 10.0
+            for _att_pass in range(2):
+                for cmask_w, (cx1, cy1, cw_c, ch_c, carea), (ccx, ccy) in att_comps:
+                    if carea < 45:
+                        continue
+                    cmask_i = cmask_w & (face_bin > 0)
+                    if not np.any(cmask_i):
+                        continue
+                    # Skip hollow background arcs or large non-diacritic background elements
+                    f_sol_c = int(np.sum(cmask_i)) / float(max(1, cw_c * ch_c))
+                    if f_sol_c < 0.22 and carea > 1200 and (cw_c > 260 or ch_c > 160):
+                        continue
+                    # Skip if already mostly assigned to a seed or icon
+                    if np.mean(seed_map[cmask_w] > 0) >= 0.45:
+                        continue
+                    best_item = None
+                    best_cost = 1e12
+                    # True pixel distance from this mark to each word's letter faces: decides ownership of marks sitting
+                    # between two lines (e.g. the dot of 'Ạ' in 'SẠCH' vs the '`' of 'VÀ' just below it).
+                    R = 180
+                    wy0, wy1_ = max(0, cy1 - R), min(self.h, cy1 + ch_c + R)
+                    wx0, wx1_ = max(0, cx1 - R), min(self.w, cx1 + cw_c + R)
+                    comp_face_win = cmask_i[wy0:wy1_, wx0:wx1_]
+                    # Solid round blob = dấu nặng dot (belongs to the word ABOVE it); curved/elongated marks
+                    # (´ ` ~ ^ ˘ and the hook of 'ả') belong to the word BELOW them.
+                    fys, fxs = np.where(cmask_i[cy1:cy1 + ch_c, cx1:cx1 + cw_c])
+                    if len(fxs):
+                        fbw, fbh = int(fxs.max() - fxs.min() + 1), int(fys.max() - fys.min() + 1)
+                        is_round_dot = (len(fxs) / float(fbw * fbh) >= 0.55) and (0.55 <= fbw / float(fbh) <= 1.8)
                     else:
-                        # Component is BELOW w_item -> Only valid if it is a compact dot (dấu nặng '.' or dot of '!'/'?')
-                        v_gap_below = max(0.0, float(cy1 - (wy1 + wh_w)))
-                        if h_dist > 20.0 or v_gap_below > max(38.0, wh_w * 0.26):
-                            continue
-                        # Measured on the undilated letter face (w_bin dilation widens marks by ~14 px)
-                        is_compact_dot = (
-                            fbw <= max(45, int(wh_w * 0.60)) and
-                            fbh <= max(42, int(wh_w * 0.45)) and
-                            (fbw / float(max(1, fbh))) <= 1.8
-                        )
-                        if not is_compact_dot:
-                            continue
-                        bias = 0.0 if is_round_dot else 4.0
-                    item_face_win = w_item["mask"][wy0:wy1_, wx0:wx1_] & (face_bin[wy0:wy1_, wx0:wx1_] > 0)
-                    if np.any(item_face_win):
-                        d_map = distance_transform_edt(~item_face_win)
-                        d_pix = float(d_map[comp_face_win].min())
-                    else:
-                        d_pix = float(R) + h_dist
-                    cost = d_pix + bias + h_dist * 0.5
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_item = w_item
-                if best_item is not None:
-                    unassigned = cmask_w & (seed_map == 0)
-                    seed_map[unassigned] = best_item["final_id"]
-                    best_item["mask"] = best_item["mask"] | unassigned
-                    if np.any(unassigned):
-                        nx1 = min(best_item["x"], cx1)
-                        ny1 = min(best_item["y"], cy1)
-                        nx2 = max(best_item["x"] + best_item["w"], cx1 + cw_c)
-                        ny2 = max(best_item["y"] + best_item["h"], cy1 + ch_c)
-                        best_item["x"], best_item["y"] = int(nx1), int(ny1)
-                        best_item["w"], best_item["h"] = int(nx2 - nx1), int(ny2 - ny1)
+                        fbw, fbh = cw_c, ch_c
+                        is_round_dot = False
+                    for w_item in text_items:
+                        wx1, wy1, ww_w, wh_w = w_item["x"], w_item["y"], w_item["w"], w_item["h"]
+                        h_dist = max(0.0, float(max(cx1 - (wx1 + ww_w), wx1 - (cx1 + cw_c))))
+                        v_ov = max(0, min(cy1 + ch_c, wy1 + wh_w) - max(cy1, wy1))
+                        bias = 0.0
+                        h_ov_c = max(0, min(cx1 + cw_c, wx1 + ww_w) - max(cx1, wx1)) / float(max(1, cw_c))
+                        hangs_below = h_ov_c >= 0.5 and (cy1 + ch_c) > (wy1 + wh_w) + 4
+                        if v_ov >= ch_c * 0.35 and not hangs_below:
+                            # Same horizontal line (e.g. '!', '?', '.', '“', '”', or broken stroke) -> must be horizontally adjacent
+                            if h_dist > max(42.0, wh_w * 0.38):
+                                continue
+                        elif (cy1 + ch_c) <= (wy1 + 18):
+                            # Component is ABOVE w_item -> Vietnamese upper diacritic (^, ´, `, ?, ~, ˘)
+                            v_gap_above = max(0.0, float(wy1 - (cy1 + ch_c)))
+                            if h_dist > 24.0 or v_gap_above > max(58.0, wh_w * 0.42):
+                                continue
+                            if is_round_dot:
+                                bias = 10.0
+                        else:
+                            # Component is BELOW w_item -> Only valid if it is a compact dot (dấu nặng '.' or dot of '!'/'?')
+                            v_gap_below = max(0.0, float(cy1 - (wy1 + wh_w)))
+                            if h_dist > 20.0 or v_gap_below > max(38.0, wh_w * 0.26):
+                                continue
+                            # Measured on the undilated letter face (w_bin dilation widens marks by ~14 px)
+                            is_compact_dot = (
+                                fbw <= max(45, int(wh_w * 0.60)) and
+                                fbh <= max(42, int(wh_w * 0.45)) and
+                                (fbw / float(max(1, fbh))) <= 1.8
+                            )
+                            if not is_compact_dot:
+                                continue
+                            bias = 0.0 if is_round_dot else 4.0
+                        item_face_win = w_item["mask"][wy0:wy1_, wx0:wx1_] & (face_bin[wy0:wy1_, wx0:wx1_] > 0)
+                        if np.any(item_face_win):
+                            d_map = distance_transform_edt(~item_face_win)
+                            d_pix = float(d_map[comp_face_win].min())
+                        else:
+                            d_pix = float(R) + h_dist
+                        cost = d_pix + bias + h_dist * 0.5
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_item = w_item
+                    # If an icon is much closer to this small component than any word, attach it to the icon instead
+                    if best_item is not None:
+                        for ic_item in ordered_items:
+                            if not ic_item.get("is_icon"):
+                                continue
+                            ix1, iy1, iw_i, ih_i = ic_item["x"], ic_item["y"], ic_item["w"], ic_item["h"]
+                            ih_dist = max(0.0, float(max(cx1 - (ix1 + iw_i), ix1 - (cx1 + cw_c))))
+                            iv_dist = max(0.0, float(max(cy1 - (iy1 + ih_i), iy1 - (cy1 + ch_c))))
+                            ic_d = math.hypot(ih_dist, iv_dist)
+                            if ic_d <= 18.0 and ic_d + 12.0 < best_cost:
+                                best_item = ic_item
+                                best_cost = ic_d
+                    if best_item is not None:
+                        unassigned = cmask_w & (seed_map == 0)
+                        seed_map[unassigned] = best_item["final_id"]
+                        best_item["mask"] = best_item["mask"] | unassigned
+                        if np.any(unassigned):
+                            nx1 = min(best_item["x"], cx1)
+                            ny1 = min(best_item["y"], cy1)
+                            nx2 = max(best_item["x"] + best_item["w"], cx1 + cw_c)
+                            ny2 = max(best_item["y"] + best_item["h"], cy1 + ch_c)
+                            best_item["x"], best_item["y"] = int(nx1), int(ny1)
+                            best_item["w"], best_item["h"] = int(nx2 - nx1), int(ny2 - ny1)
 
         if ordered_items:
             # Propagate from the actual letter FACE pixels (not the dilated w_bin seed) so 3D outlines/extrusions
@@ -1713,9 +1793,9 @@ class ImageClusterState:
             valid = (core > 0) & ((dist_to_seed <= max_stroke_dist) | (seed_map > 0))
             lab_map = np.where(valid, nearest_seed, 0).astype(np.int32)
 
-            # Opaque islands (one connected core component) whose letter faces belong to ONE word (ignoring tiny
-            # specks of other words) are assigned wholly to that word, so a diacritic is never split between words.
-            ncc, cc = cv2.connectedComponents(core.astype(np.uint8), connectivity=8)
+            # Opaque islands (small/medium connected core components such as detached diacritic islands) whose letter
+            # faces belong to ONE word are assigned wholly to that word, so a diacritic is never split between words.
+            ncc, cc, stats_cc, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8), connectivity=8)
             if ncc > 1:
                 cc_flat = cc.ravel()
                 src_flat = src_map.ravel()
@@ -1727,7 +1807,11 @@ class ImageClusterState:
                     p_cc, p_src = uk // nmax, uk % nmax
                     face_tot = np.bincount(src_flat[src_flat > 0], minlength=nmax)
                     owner = np.zeros(ncc, dtype=np.int32)
+                    max_island_area = max(18000, int(self.h * self.w * 0.035))
                     for ci in np.unique(p_cc):
+                        ci_int = int(ci)
+                        if stats_cc[ci_int, cv2.CC_STAT_AREA] > max_island_area or stats_cc[ci_int, cv2.CC_STAT_WIDTH] > int(self.w * 0.42):
+                            continue
                         msk = p_cc == ci
                         srcs, cnts = p_src[msk], uc[msk]
                         k = int(np.argmax(cnts))
@@ -1742,10 +1826,34 @@ class ImageClusterState:
                                 ok = False
                                 break
                         if ok:
-                            owner[ci] = major
+                            owner[ci_int] = major
                     own_map = owner[cc]
                     fix = (own_map > 0) & (lab_map > 0)
                     lab_map[fix] = own_map[fix]
+
+            # Capture any large unassigned decorative graphic bars (e.g. '===' neon speed-bars beside text lines) as icon blocks
+            rem_core = ((core > 0) & (lab_map == 0)).astype(np.uint8)
+            if np.any(rem_core):
+                nr_c, lr_c, sr_c, cr_c = cv2.connectedComponentsWithStats(rem_core, connectivity=8)
+                for ri in range(1, nr_c):
+                    rx, ry, rw, rh, rarea = sr_c[ri]
+                    if rarea >= 12000 and rw >= 120 and rh >= 45:
+                        rmask = (lr_c == ri)
+                        rcx, rcy = float(cr_c[ri][0]), float(cr_c[ri][1])
+                        near_b = min(ordered_items, key=lambda b: abs(rcy - b["cy"]))
+                        new_fid = sid
+                        sid += 1
+                        lab_map[rmask] = new_fid
+                        ordered_items.append({
+                            "mask": rmask,
+                            "x": int(rx), "y": int(ry), "w": int(rw), "h": int(rh),
+                            "cx": rcx, "cy": rcy,
+                            "final_id": new_fid,
+                            "line_index": near_b["line_index"],
+                            "text": "✨", "is_icon": True
+                        })
+                ordered_items.sort(key=lambda b: (b["line_index"], b["x"]))
+
             self.label_map = lab_map
         else:
             self.label_map = np.zeros((self.h, self.w), dtype=np.int32)
@@ -2036,20 +2144,30 @@ class ImageClusterState:
         if not sorted_cids:
             return []
 
+        max_dim = max(self.w, self.h)
+        work_scale = (1800.0 / float(max_dim)) if max_dim > 2400 else 1.0
+        if work_scale < 1.0:
+            ww = max(1, int(round(self.w * work_scale)))
+            wh = max(1, int(round(self.h * work_scale)))
+            work_lmap = cv2.resize(self.label_map.astype(np.float32), (ww, wh), interpolation=cv2.INTER_NEAREST).astype(np.int32)
+        else:
+            work_lmap = self.label_map
+
         cluster_raw_masks = []
         cluster_cores = []
         cluster_bboxes = []
         for cid in sorted_cids:
             b_ids = cluster_blocks[cid]
-            cmask = np.isin(self.label_map, b_ids).astype(np.uint8)
-            cluster_raw_masks.append(cmask)
-            ys, xs = np.where(cmask > 0)
+            nat_cmask = np.isin(self.label_map, b_ids)
+            ys, xs = np.where(nat_cmask)
             if len(xs) > 0:
                 cluster_bboxes.append((int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())))
             else:
                 cluster_bboxes.append((0, 0, self.w, self.h))
 
-            other_mask = (self.label_map > 0) & (~cmask.astype(bool))
+            cmask = np.isin(work_lmap, b_ids).astype(np.uint8)
+            cluster_raw_masks.append(cmask)
+            other_mask = (work_lmap > 0) & (~cmask.astype(bool))
             closed = cv2.morphologyEx(cmask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (65, 19)))
             closed[other_mask] = 0
             cluster_cores.append(closed)
@@ -2058,10 +2176,11 @@ class ImageClusterState:
         dists_stack = np.stack(dists, axis=0)
         nearest_idx = np.argmin(dists_stack, axis=0)
 
+        inv_scale = 1.0 / work_scale
         results = []
         for k, cid in enumerate(sorted_cids):
             cmask = cluster_raw_masks[k]
-            other_mask = ((self.label_map > 0) & (~cmask.astype(bool))).astype(np.uint8)
+            other_mask = ((work_lmap > 0) & (~cmask.astype(bool))).astype(np.uint8)
             territory = ((nearest_idx == k) & (dists[k] <= self.outer_padding)).astype(np.uint8) * 255
             blur_k = max(11, int(round(self.smoothness * 7)) | 1)
             territory = cv2.GaussianBlur(territory, (blur_k, blur_k), 0)
@@ -2080,7 +2199,7 @@ class ImageClusterState:
                     continue
                 eps = max(1.5, float(self.smoothness))
                 approx = cv2.approxPolyDP(cnt, eps, True)
-                pts = [[round(float(p[0][0]), 1), round(float(p[0][1]), 1)] for p in approx]
+                pts = [[round(float(p[0][0]) * inv_scale, 1), round(float(p[0][1]) * inv_scale, 1)] for p in approx]
                 if len(pts) < 3:
                     continue
 
@@ -2633,12 +2752,40 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             : new Window("palette", "✨ AE Text Cluster & Mask Splitter", undefined, {{ resizeable: true }});
 
         win.orientation = "column";
-        win.alignChildren = ["fill", "top"];
-        win.spacing = 5;
-        win.margins = 8;
+        win.alignChildren = ["fill", "fill"];
+        win.spacing = 2;
+        win.margins = 6;
+
+        // Scrollable Viewport Row (Content + Vertical Scrollbar)
+        var mainArea = win.add("group");
+        mainArea.orientation = "row";
+        mainArea.alignment = ["fill", "fill"];
+        mainArea.alignChildren = ["fill", "fill"];
+        mainArea.spacing = 4;
+        mainArea.margins = 0;
+
+        var viewport = mainArea.add("group");
+        viewport.orientation = "stack";
+        viewport.alignment = ["fill", "fill"];
+        viewport.alignChildren = ["left", "top"];
+        viewport.margins = 0;
+
+        var contentGrp = viewport.add("group");
+        contentGrp.orientation = "column";
+        contentGrp.alignChildren = ["fill", "top"];
+        contentGrp.spacing = 5;
+        contentGrp.margins = 2;
+
+        var vScroll = mainArea.add("scrollbar", undefined, 0, 0, 100);
+        vScroll.alignment = ["right", "fill"];
+        vScroll.preferredSize = [14, -1];
+
+        var hScroll = win.add("scrollbar", undefined, 0, 0, 100);
+        hScroll.alignment = ["fill", "bottom"];
+        hScroll.preferredSize = [-1, 14];
 
         // Tier 1A: Source Layer & File Selector
-        var selRow = win.add("group");
+        var selRow = contentGrp.add("group");
         selRow.orientation = "row";
         selRow.alignChildren = ["left", "center"];
         selRow.spacing = 6;
@@ -2649,7 +2796,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         ddFiles.preferredSize.width = 375;
 
         // Tier 1B: 1-Click Presets + Undo
-        var presetRow = win.add("group");
+        var presetRow = contentGrp.add("group");
         presetRow.orientation = "row";
         presetRow.alignChildren = ["fill", "center"];
         presetRow.spacing = 5;
@@ -2661,7 +2808,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         btnUndo.preferredSize.width = 75;
 
         // Tier 2: Direct-Manipulation Preview Canvas
-        var imgGroup = win.add("panel", undefined, "Preview (Click 2 từ = Gộp cụm | Click lại/Shift = Tách riêng | Alt+Click = Cắt đôi):");
+        var imgGroup = contentGrp.add("panel", undefined, "Preview (Click 2 từ = Gộp cụm | Click lại/Shift = Tách riêng | Alt+Click = Cắt đôi):");
         imgGroup.orientation = "column";
         imgGroup.alignChildren = ["center", "center"];
         imgGroup.margins = [6, 12, 6, 6];
@@ -2670,7 +2817,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         previewImg.preferredSize = [520, 340];
 
         // Tier 3: 1-Line Editable Layer Names
-        var nameRow = win.add("group");
+        var nameRow = contentGrp.add("group");
         nameRow.orientation = "row";
         nameRow.alignChildren = ["left", "center"];
         nameRow.spacing = 6;
@@ -2682,7 +2829,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         txtNames.helpTip = "Tên các Layer sẽ tạo trong AE (ngăn cách bởi dấu |). Bạn có thể sửa trực tiếp tại đây!";
 
         // Collapsible Advanced Settings (hidden by default to keep UI ultra-clean)
-        var paramPanel = win.add("panel", undefined, "Thông số nâng cao (Mask & Anchor Point):");
+        var paramPanel = contentGrp.add("panel", undefined, "Thông số nâng cao (Mask & Anchor Point):");
         paramPanel.orientation = "column";
         paramPanel.alignChildren = ["fill", "top"];
         paramPanel.spacing = 4;
@@ -2710,7 +2857,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         chkAnchor.value = true;
 
         // Tier 4: Primary Action Row
-        var botRow = win.add("group");
+        var botRow = contentGrp.add("group");
         botRow.orientation = "row";
         botRow.alignChildren = ["fill", "center"];
         botRow.spacing = 6;
@@ -2729,8 +2876,57 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         btnWeb.preferredSize.height = 34;
         btnWeb.helpTip = "Mở giao diện Web đầy đủ (Dao cắt tự do)";
 
-        var statusTxt = win.add("statictext", undefined, "Sẵn sàng. Click chọn Layer trên AE để bắt đầu.");
+        var statusTxt = contentGrp.add("statictext", undefined, "Sẵn sàng. Click chọn Layer trên AE để bắt đầu.");
         statusTxt.characters = 74;
+
+        function updateScroll() {{
+            if (!win.size || !contentGrp.size) return;
+            var viewW = Math.max(120, win.size[0] - 28);
+            var viewH = Math.max(120, win.size[1] - 28);
+            var contW = contentGrp.size[0] || 545;
+            var contH = contentGrp.size[1] || 520;
+            var maxX = Math.max(0, contW - viewW);
+            var maxY = Math.max(0, contH - viewH);
+            hScroll.maxvalue = maxX;
+            vScroll.maxvalue = maxY;
+            hScroll.stepdelta = 25;
+            vScroll.stepdelta = 25;
+            hScroll.jumpdelta = 80;
+            vScroll.jumpdelta = 80;
+            hScroll.visible = (maxX > 4);
+            vScroll.visible = (maxY > 4);
+            if (hScroll.value > maxX) hScroll.value = maxX;
+            if (vScroll.value > maxY) vScroll.value = maxY;
+            if (hScroll.value < 0) hScroll.value = 0;
+            if (vScroll.value < 0) vScroll.value = 0;
+            contentGrp.location = [-Math.round(hScroll.value), -Math.round(vScroll.value)];
+        }}
+
+        vScroll.onChanging = vScroll.onChange = function() {{
+            contentGrp.location = [-Math.round(hScroll.value), -Math.round(this.value)];
+        }};
+
+        hScroll.onChanging = hScroll.onChange = function() {{
+            contentGrp.location = [-Math.round(this.value), -Math.round(vScroll.value)];
+        }};
+
+        win.onResizing = win.onResize = function() {{
+            this.layout.resize();
+            updateScroll();
+        }};
+
+        try {{
+            win.addEventListener("mousewheel", function(e) {{
+                var d = (e.detail || e.wheelDelta || 0);
+                var step = (d > 0) ? -28 : 28;
+                if (e.shiftKey && hScroll.visible) {{
+                    hScroll.value = Math.max(0, Math.min(hScroll.maxvalue, hScroll.value + step));
+                }} else if (vScroll.visible) {{
+                    vScroll.value = Math.max(0, Math.min(vScroll.maxvalue, vScroll.value + step));
+                }}
+                contentGrp.location = [-Math.round(hScroll.value), -Math.round(vScroll.value)];
+            }});
+        }} catch (eWheel) {{}}
 
         function refreshPreview(res) {{
             if (res && res.ok && res.previewPath) {{
@@ -2825,6 +3021,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             paramPanel.maximumSize.height = showAdv ? 140 : 0;
             win.layout.layout(true);
             win.layout.resize();
+            updateScroll();
         }};
 
         previewImg.addEventListener("mousedown", function(e) {{
@@ -2874,6 +3071,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
         }};
 
         win.layout.layout(true);
+        updateScroll();
         loadCurrentFromAE();
         return win;
     }}
@@ -2914,14 +3112,19 @@ HTML_UI = r"""<!DOCTYPE html>
     --danger: #ef4444;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #12151e; }
+  ::-webkit-scrollbar-thumb { background: #333b52; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #4b5678; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--bg);
     color: var(--text);
-    height: 100vh;
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
     user-select: none;
   }
   header {
