@@ -14,29 +14,61 @@
     // In-process HTTP GET over ExtendScript Socket: no curl / cmd.exe process spawn per click (system.callSystem
     // costs ~150-400 ms + a console flash on Windows, and decodes output in the ANSI codepage which garbles Vietnamese).
     function httpGet(pathQuery, timeoutSec) {
-        var s = new Socket();
-        s.timeout = timeoutSec || 30;
-        s.encoding = "BINARY";
-        if (!s.open("127.0.0.1:" + PORT, "BINARY")) return null;
-        s.write("GET " + pathQuery + " HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-        var raw = "";
-        while (s.connected && !s.eof) {
-            var chunk = s.read(65536);
-            if (!chunk) break;
-            raw += chunk;
+        var tmo = timeoutSec || 30;
+        try {
+            var s = new Socket();
+            s.timeout = tmo;
+            if (!s.open("127.0.0.1:" + PORT, "BINARY")) return null;
+            s.write("GET " + pathQuery + " HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            // Read until the body reaches Content-Length (the server may close the socket before our first read,
+            // so never gate the loop on s.connected: buffered data must still be drained).
+            var raw = "";
+            var t0 = new Date().getTime();
+            while (true) {
+                var chunk = s.read(65536);
+                if (chunk && chunk.length) raw += chunk;
+                var hs = raw.indexOf("\r\n\r\n");
+                if (hs !== -1) {
+                    var m = raw.substring(0, hs).match(/Content-Length:\s*(\d+)/i);
+                    if (m && (raw.length - hs - 4) >= parseInt(m[1], 10)) break;
+                }
+                if (s.eof) break;
+                if (!chunk && !s.connected) break;
+                if (new Date().getTime() - t0 > tmo * 1000) break;
+            }
+            s.close();
+            var sep = raw.indexOf("\r\n\r\n");
+            if (sep === -1) return null;
+            var body = raw.substring(sep + 4);
+            try { body = decodeURIComponent(escape(body)); } catch (eDec) {}
+            return body;
+        } catch (eSock) {
+            return null;
         }
-        s.close();
-        var sep = raw.indexOf("\r\n\r\n");
-        if (sep === -1) return null;
-        var body = raw.substring(sep + 4);
-        try { body = decodeURIComponent(escape(body)); } catch (eDec) {}
-        return body;
+    }
+
+    // Fallback transport (old behaviour) if Socket is blocked on this machine
+    function curlGet(pathQuery, timeoutSec) {
+        var curlCmd = IS_MAC ? "curl" : "curl.exe";
+        var res = system.callSystem(curlCmd + " -s -m " + (timeoutSec || 30) + ' "http://127.0.0.1:' + PORT + pathQuery + '"');
+        return (res && res.length) ? res : null;
+    }
+
+    var useCurl = false;
+    function apiGet(pathQuery, timeoutSec) {
+        if (!useCurl) {
+            var r = httpGet(pathQuery, timeoutSec);
+            if (r !== null) return r;
+        }
+        var rc = curlGet(pathQuery, timeoutSec);
+        if (rc !== null) useCurl = true;
+        return rc;
     }
 
     var serverAlive = false;
     function ensureServer() {
         if (serverAlive) return;
-        var ping = httpGet("/api/ping", 2);
+        var ping = apiGet("/api/ping", 2);
         if (ping && ping.indexOf("ok") !== -1) { serverAlive = true; return; }
         if (IS_MAC) {
             system.callSystem("'" + PY_EXE + "' '" + SCRIPT_PY + "' --port " + PORT + " --no-browser >/tmp/ae_splitter.log 2>&1 &");
@@ -57,7 +89,7 @@
         }
         for (var w = 0; w < 25; w++) {
             $.sleep(400);
-            ping = httpGet("/api/ping", 2);
+            ping = apiGet("/api/ping", 2);
             if (ping && ping.indexOf("ok") !== -1) { serverAlive = true; return; }
         }
     }
@@ -73,11 +105,11 @@
     function callApi(endpoint, query) {
         ensureServer();
         var pq = endpoint + (query ? ("?" + query) : "");
-        var res = httpGet(pq, 60);
+        var res = apiGet(pq, 60);
         if (res === null) {
             serverAlive = false;
             ensureServer();
-            res = httpGet(pq, 60);
+            res = apiGet(pq, 60);
         }
         try {
             return eval("(" + res + ")");
@@ -224,7 +256,10 @@
         var btnFetch = selRow.add("button", undefined, "🔄 Lấy Layer AE");
         btnFetch.preferredSize = [125, 25];
         var ddFiles = selRow.add("dropdownlist", undefined, ["(Chọn nhanh file ảnh...)"]);
-        ddFiles.preferredSize = [355, 25];
+        ddFiles.preferredSize = [285, 25];
+        var chkAuto = selRow.add("checkbox", undefined, "Tự nạp");
+        chkAuto.value = true;
+        chkAuto.helpTip = "Tự động nạp lại khi bạn click chọn 1 Layer ảnh/PSD khác trên Timeline hoặc Project Panel";
 
         // Tier 1B: 1-Click Presets + Undo
         var presetRow = contentGrp.add("group");
@@ -424,7 +459,44 @@
                 statusTxt.text = "⚠️ Hãy click chọn 1 Layer ảnh/PSD trên Timeline hoặc trong Project Panel!";
                 return;
             }
+            lastAutoKey = info.path + "|" + (info.sourceName || info.layerName || "");
             loadFileByPath(info.path, info);
+        }
+
+        // ---- Auto-follow: reload when the user selects a DIFFERENT image layer while the panel is open ----
+        var lastAutoKey = "";
+        function hasExplicitSelection() {
+            var act = app.project ? app.project.activeItem : null;
+            if (act && (act instanceof CompItem) && act.selectedLayers && act.selectedLayers.length > 0) return true;
+            if (act && (act instanceof FootageItem)) return true;
+            return !!(app.project && app.project.selection && app.project.selection.length > 0);
+        }
+        function autoFollowTick() {
+            try {
+                if (!win || !win.visible) return;
+                if (!chkAuto.value || !hasExplicitSelection()) return;
+                var info = detectSelectedLayerOrItemInAE();
+                if (!info || !info.path) return;
+                // Same source file + same PSD sub-layer = same key, so the split layers created by
+                // "TÁCH LAYER" (duplicates of the same source) never reset the user's clusters.
+                var key = info.path + "|" + (info.sourceName || info.layerName || "");
+                if (key === lastAutoKey) return;
+                lastAutoKey = key;
+                statusTxt.text = "⏳ Đang nạp layer: " + (info.layerName || info.path) + " ...";
+                loadFileByPath(info.path, info);
+            } catch (eAuto) {}
+        }
+        if ($.global.aeTCSAutoTask) {
+            try { app.cancelTask($.global.aeTCSAutoTask); } catch (eC) {}
+        }
+        $.global.aeTCSAutoTick = autoFollowTick;
+        $.global.aeTCSAutoTask = app.scheduleTask("if ($.global.aeTCSAutoTick) $.global.aeTCSAutoTick();", 700, true);
+        if (win instanceof Window) {
+            win.onClose = function() {
+                try { app.cancelTask($.global.aeTCSAutoTask); } catch (eX) {}
+                $.global.aeTCSAutoTask = null;
+                $.global.aeTCSAutoTick = null;
+            };
         }
 
         btnFetch.onClick = function() {
