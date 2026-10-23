@@ -503,6 +503,7 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
     s = re.sub(r"(OMO)([A-ZÀ-Ỹ]+)", r"\1 \2", s)
     s = re.sub(r"([A-ZÀ-Ỹ]+)(OMO)", r"\1 \2", s)
     s = re.sub(r"(C[ẶẬA]N)(B[ỌO]T)", r"\1 \2", s)
+    s = re.sub(r"(GI[ẶẬÀA]T)(NHANH)", r"\1 \2", s)
     tokens = [t for t in re.split(r"\s+", s) if t]
     out_tokens = []
     for t in tokens:

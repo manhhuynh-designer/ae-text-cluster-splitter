@@ -3,7 +3,7 @@
 // ============================================================================
 (function(thisObj) {
     var PORT = 8765;
-    var PY_EXE = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/ae-text-cluster-splitter/../.venv/bin/python";
+    var PY_EXE = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/.venv/bin/python";
     var SCRIPT_PY = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/ae-text-cluster-splitter/text_cluster_splitter.py";
     var REQ_FILE = "/var/folders/sj/1cktqpfx2xb566cpz_76w0k40000gp/T/ae_splitter_req.json";
     var RENDER_FILE = "/var/folders/sj/1cktqpfx2xb566cpz_76w0k40000gp/T/ae_splitter_src_render.png";
