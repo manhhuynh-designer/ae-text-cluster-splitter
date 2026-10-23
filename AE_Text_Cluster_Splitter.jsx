@@ -6,6 +6,7 @@
     var PY_EXE = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/ae-text-cluster-splitter/../.venv/bin/python";
     var SCRIPT_PY = "/Users/huynhducmanh/Desktop/WORKING/Video-editor-main/ae-text-cluster-splitter/text_cluster_splitter.py";
     var REQ_FILE = "/var/folders/sj/1cktqpfx2xb566cpz_76w0k40000gp/T/ae_splitter_req.json";
+    var RENDER_FILE = "/var/folders/sj/1cktqpfx2xb566cpz_76w0k40000gp/T/ae_splitter_src_render.png";
     var IS_MAC = ($.os.indexOf("Mac") !== -1);
     var activeCluster = 1;
     var siblingFiles = [];
@@ -137,6 +138,7 @@
                 sourceName: (l.source && l.source.name) ? l.source.name : "",
                 layerWidth: l.width || 0,
                 layerHeight: l.height || 0,
+                item: l.source,
                 label: l.name + " (" + compName + ")"
             };
         }
@@ -149,6 +151,7 @@
                 sourceName: item.name || "",
                 layerWidth: item.width || 0,
                 layerHeight: item.height || 0,
+                item: item,
                 label: item.name + " (Project Panel)"
             };
         }
@@ -442,13 +445,46 @@
             return String(s || "").replace(/\\/g, "/").replace(/"/g, '\\"');
         }
 
+        // Render a PSD footage item exactly as AE draws it (Layer Styles, smart objects, AE's own layer bounds), so the
+        // masks are computed in the same pixel frame as the AE layer. psd-tools can't reproduce layer effects and may
+        // not find renamed / nested layers.
+        function renderFootageToPng(fi) {
+            var out = new File(RENDER_FILE);
+            var tmpComp = null;
+            try {
+                if (out.exists) out.remove();
+                app.beginUndoGroup("Text Splitter preview render");
+                tmpComp = app.project.items.addComp("__TCS_RENDER__", Math.max(4, fi.width), Math.max(4, fi.height), 1, 1, 25);
+                tmpComp.layers.add(fi);
+                tmpComp.saveFrameToPng(0, out);
+                // saveFrameToPng writes asynchronously
+                var waited = 0;
+                while ((!out.exists || out.length === 0) && waited < 8000) { $.sleep(50); waited += 50; }
+                $.sleep(60);
+            } catch (eR) {
+            } finally {
+                try { if (tmpComp) tmpComp.remove(); } catch (eRm) {}
+                try { app.endUndoGroup(); } catch (eU) {}
+            }
+            return (out.exists && out.length > 0) ? out.fsName : "";
+        }
+
         function loadFileByPath(fp, info) {
             var cleanPath = escJson(fp);
             var lName = info ? escJson(info.layerName) : "";
             var sName = info ? escJson(info.sourceName) : "";
             var lw = (info && info.layerWidth) ? info.layerWidth : 0;
             var lh = (info && info.layerHeight) ? info.layerHeight : 0;
-            writeReqJson('{"file": "' + cleanPath + '", "layerName": "' + lName + '", "sourceName": "' + sName + '", "layerWidth": ' + lw + ', "layerHeight": ' + lh + '}');
+            var renderPath = "";
+            if (info && info.item && info.item.footageMissing) {
+                statusTxt.text = "⚠️ Footage '" + info.item.name + "' đang bị mất (offline) trong AE. Hãy Relink file trước khi tách.";
+                return;
+            }
+            if (info && info.item && /\.psd$/i.test(String(fp))) {
+                statusTxt.text = "⏳ Đang render layer PSD từ After Effects...";
+                renderPath = escJson(renderFootageToPng(info.item));
+            }
+            writeReqJson('{"file": "' + cleanPath + '", "layerName": "' + lName + '", "sourceName": "' + sName + '", "layerWidth": ' + lw + ', "layerHeight": ' + lh + ', "renderPath": "' + renderPath + '"}');
             var res = callApi("/api/su_init_from_req", "");
             refreshPreview(res);
         }

@@ -186,6 +186,7 @@ def run_ae_jsx(jsx_code: str, timeout: float = 8.0) -> str:
 
 def get_active_ae_layer_info() -> dict:
     """Queries After Effects for the currently selected layer or FootageItem."""
+    render_png_path = str(Path(tempfile.gettempdir()) / "ae_splitter_src_render.png").replace("\\", "/")
     out_path = str(Path(tempfile.gettempdir()) / "ae_splitter_out.json").replace("\\", "/")
     jsx = f"""
     (function() {{
@@ -285,7 +286,31 @@ def get_active_ae_layer_info() -> dict:
             var compName = comp ? comp.name.replace(/"/g, '\\\\"') : "";
             var layerName = targetLayer.name.replace(/"/g, '\\\\"');
             var srcName = (targetLayer.source && targetLayer.source.name) ? targetLayer.source.name.replace(/"/g, '\\\\"') : "";
-            f.write('{{"ok": true, "compName": "' + compName + '", "layerName": "' + layerName + '", "sourceName": "' + srcName + '", "layerWidth": ' + targetLayer.width + ', "layerHeight": ' + targetLayer.height + ', "layerIndex": ' + targetLayer.index + ', "filePath": "' + filePath + '"}}');
+            var renderPath = "";
+            if (targetLayer.source.footageMissing) {{
+                f.write('{{"ok": false, "error": "Footage ' + srcName + ' đang bị mất (offline) trong AE. Hãy Relink file trước khi tách."}}');
+                f.close();
+                return;
+            }}
+            if (/\\.psd$/i.test(filePath)) {{
+                // Render the PSD layer exactly as AE draws it (Layer Styles / smart objects / AE layer bounds)
+                var rOut = new File("{render_png_path}");
+                var rComp = null;
+                try {{
+                    if (rOut.exists) rOut.remove();
+                    app.beginUndoGroup("Text Splitter preview render");
+                    rComp = app.project.items.addComp("__TCS_RENDER__", Math.max(4, targetLayer.source.width), Math.max(4, targetLayer.source.height), 1, 1, 25);
+                    rComp.layers.add(targetLayer.source);
+                    rComp.saveFrameToPng(0, rOut);
+                    var rw = 0; while ((!rOut.exists || rOut.length === 0) && rw < 8000) {{ $.sleep(50); rw += 50; }}
+                    $.sleep(60);
+                }} catch (eR) {{}} finally {{
+                    try {{ if (rComp) rComp.remove(); }} catch (eRm) {{}}
+                    try {{ app.endUndoGroup(); }} catch (eU) {{}}
+                }}
+                if (rOut.exists && rOut.length > 0) renderPath = rOut.fsName.replace(/\\\\/g, "/");
+            }}
+            f.write('{{"ok": true, "compName": "' + compName + '", "layerName": "' + layerName + '", "sourceName": "' + srcName + '", "layerWidth": ' + targetLayer.width + ', "layerHeight": ' + targetLayer.height + ', "layerIndex": ' + targetLayer.index + ', "filePath": "' + filePath + '", "renderPath": "' + renderPath + '"}}');
             f.close();
             return;
         }}
@@ -528,7 +553,7 @@ def clean_ocr_line_tokens(raw_line: str, hint_words: list) -> list:
         out_tokens.append(core_w + punct)
 
     # Fold trailing 3D exclamation mark misread as a single-letter token ('V', 'I', 'Y', '1', 'L') into the preceding word
-    if len(out_tokens) >= 2 and out_tokens[-1] in ("V", "I", "Y", "1", "L") and strip_accents(out_tokens[-2]) in ("TAT", "LO", "CHAM", "DONG"):
+    if len(out_tokens) >= 2 and out_tokens[-1] in ("V", "I", "Y", "1", "L", "4", "T") and strip_accents(out_tokens[-2]) in ("TAT", "LO", "CHAM", "DONG"):
         out_tokens.pop()
         if not out_tokens[-1].endswith("!"):
             out_tokens[-1] += "!"
@@ -772,7 +797,7 @@ class ImageClusterState:
 
     def load_image(self, file_path: str, split_pinch: bool = True,
                    layer_name: str = "", source_name: str = "",
-                   layer_w: int = 0, layer_h: int = 0):
+                   layer_w: int = 0, layer_h: int = 0, render_path: str = ""):
         file_path = resolve_mac_path(file_path)
         if not file_path or not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -781,11 +806,44 @@ class ImageClusterState:
         self.selected_block_id = None
         self.custom_cluster_names = {}
 
-        if file_path.lower().endswith(".psd"):
+        # Pixels rendered by After Effects itself (PSD layers): exact layer bounds incl. Layer Styles / smart objects
+        ae_render = None
+        if render_path and file_path.lower().endswith(".psd") and os.path.exists(render_path):
+            ae_render = cv2.imread(render_path, cv2.IMREAD_UNCHANGED)
+            if ae_render is not None:
+                if ae_render.ndim == 2:
+                    ae_render = cv2.cvtColor(ae_render, cv2.COLOR_GRAY2BGRA)
+                elif ae_render.shape[2] == 3:
+                    ae_render = cv2.cvtColor(ae_render, cv2.COLOR_BGR2BGRA)
+                if ae_render.dtype != np.uint8:
+                    ae_render = (ae_render.astype(np.float32) / 257.0).clip(0, 255).astype(np.uint8)
+                if layer_w and layer_h and (ae_render.shape[1], ae_render.shape[0]) != (int(layer_w), int(layer_h)):
+                    ae_render = None
+
+        if ae_render is not None:
+            img = ae_render
+            if np.percentile(img[:, :, 3], 5) >= 250:
+                img[:, :, 3] = synthesize_alpha_from_bgr(img[:, :, :3])
+            self.file_path = file_path
+            self.layer_name = layer_name or (source_name.split("/")[0] if "/" in source_name else "")
+            self.source_name = source_name
+            self.layer_w, self.layer_h = img.shape[1], img.shape[0]
+            self.img_bgra = img
+            self.h, self.w = img.shape[:2]
+            self.alpha = img[:, :, 3]
+            ok_enc, png_buf = cv2.imencode(".png", img)
+            self.preview_b64 = ("data:image/png;base64," + base64.b64encode(png_buf.tobytes()).decode("ascii")) if ok_enc else ""
+        elif file_path.lower().endswith(".psd"):
             img, b64_str, matched_src = extract_psd_layer_bgra(
                 file_path, layer_name=layer_name, source_name=source_name,
                 layer_w=int(layer_w or 0), layer_h=int(layer_h or 0)
             )
+            if layer_w and layer_h and (img.shape[1], img.shape[0]) != (int(layer_w), int(layer_h)):
+                raise ValueError(
+                    f"Layer PSD '{layer_name or source_name}' trong AE có kích thước {int(layer_w)}x{int(layer_h)} nhưng "
+                    f"đọc từ file PSD ra {img.shape[1]}x{img.shape[0]} (Layer Style / Smart Object / tên layer khác). "
+                    "Hãy dùng nút '🔄 Lấy Layer AE' trong panel để AE render đúng layer này."
+                )
             self.file_path = file_path
             self.layer_name = layer_name or (matched_src.split("/")[0] if "/" in matched_src else "")
             self.source_name = matched_src
@@ -1638,6 +1696,9 @@ class ImageClusterState:
 
         # 5. Run cross-platform VietOCR on line crops & align with word seeds via DP / Valley Profile
         fname = unicodedata.normalize("NFC", os.path.basename(self.file_path or ""))
+        if (self.file_path or "").lower().endswith(".psd") and getattr(self, "layer_name", ""):
+            # PSD: the layer name ('chưa kịp giặt', 'Tittle Card') is the useful OCR hint, not 'batch3_VD4.psd'
+            fname = unicodedata.normalize("NFC", self.layer_name) + ".psd"
         fname_clean = re.split(r"-\s*\d|\d{4,}", os.path.splitext(fname)[0])[0]
         hint_words = [w.upper() for w in re.findall(r"[A-Za-zÀ-ỹ0-9]+", fname_clean)]
 
@@ -1668,6 +1729,13 @@ class ImageClusterState:
             y1b = max(y1, min(c["body_y"] for c in ln) - int(med_bh * 0.30))
             if y1b - y1 >= 12:
                 alt.append(Image.fromarray(cv2.cvtColor(crop_g[y1b - y1:, :], cv2.COLOR_GRAY2RGB)))
+            # Alternative padded crop: glyphs touching the crop edges (tight PSD/AE renders, wide display fonts)
+            # confuse the OCR; a white margin like its training data fixes it. Confidence decides.
+            ch_g = crop_g.shape[0]
+            pad_v, pad_h = max(6, int(ch_g * 0.18)), max(6, int(ch_g * 0.10))
+            alt.append(Image.fromarray(cv2.cvtColor(
+                cv2.copyMakeBorder(crop_g, pad_v, pad_v, pad_h, pad_h, cv2.BORDER_CONSTANT, value=255),
+                cv2.COLOR_GRAY2RGB)))
             line_crops.append((Image.fromarray(crop), alt))
 
         raw_preds = []
@@ -2481,6 +2549,58 @@ def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
             return (l && (l.comment === "AE_TEXT_CLUSTER_SPLIT" || l.name.indexOf("[Cụm ") === 0));
         }}
 
+        // Move the anchor to the cluster centre WITHOUT moving the layer on screen and WITHOUT breaking animation:
+        // keyframed Position is offset key-by-key; keyframed Anchor / Scale / Rotation (pivot-dependent) -> keep as is.
+        var anchorSkipped = 0;
+        function centerAnchorKeepingPlacement(lyr, cx, cy) {{
+            var tg = lyr.property("ADBE Transform Group");
+            var ap = tg.property("ADBE Anchor Point");
+            var sc = tg.property("ADBE Scale");
+            var rot = tg.property("ADBE Rotate Z");
+            if (ap.numKeys > 0 || sc.numKeys > 0 || (rot && rot.numKeys > 0) || ap.expressionEnabled) {{
+                anchorSkipped++;
+                return;
+            }}
+            var a0 = ap.value;
+            var s = sc.value;
+            var dx = (cx - a0[0]) * s[0] / 100.0;
+            var dy = (cy - a0[1]) * s[1] / 100.0;
+            var r = (rot ? rot.value : 0) * Math.PI / 180.0;
+            var ox = dx * Math.cos(r) - dy * Math.sin(r);
+            var oy = dx * Math.sin(r) + dy * Math.cos(r);
+            var pos = tg.property("ADBE Position");
+            var posProps = [];
+            if (pos.dimensionsSeparated) {{
+                posProps.push([tg.property("ADBE Position_0"), ox]);
+                posProps.push([tg.property("ADBE Position_1"), oy]);
+            }}
+            var newA = [cx, cy];
+            if (a0.length > 2) newA.push(a0[2]);
+            ap.setValue(newA);
+            if (posProps.length) {{
+                for (var pi = 0; pi < posProps.length; pi++) {{
+                    var pp = posProps[pi][0], off = posProps[pi][1];
+                    if (pp.numKeys > 0) {{
+                        for (var k = 1; k <= pp.numKeys; k++) pp.setValueAtKey(k, pp.keyValue(k) + off);
+                    }} else {{
+                        pp.setValue(pp.value + off);
+                    }}
+                }}
+            }} else if (pos.numKeys > 0) {{
+                for (var k2 = 1; k2 <= pos.numKeys; k2++) {{
+                    var kv = pos.keyValue(k2);
+                    var nv = [kv[0] + ox, kv[1] + oy];
+                    if (kv.length > 2) nv.push(kv[2]);
+                    pos.setValueAtKey(k2, nv);
+                }}
+            }} else {{
+                var pv = pos.value;
+                var np = [pv[0] + ox, pv[1] + oy];
+                if (pv.length > 2) np.push(pv[2]);
+                pos.setValue(np);
+            }}
+        }}
+
         app.beginUndoGroup("Auto Split Text Clusters");
         try {{
             var comp = app.project.activeItem;
@@ -2608,19 +2728,7 @@ def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
                 }}
 
                 if (data.centerAnchor && cInfo.anchor && cInfo.anchor.length >= 2) {{
-                    var cx = cInfo.anchor[0];
-                    var cy = cInfo.anchor[1];
-                    var sx = origScale[0] / 100.0;
-                    var sy = origScale[1] / 100.0;
-                    var newAx = [cx, cy];
-                    var newPx = [
-                        origPos[0] + (cx - origAnchor[0]) * sx,
-                        origPos[1] + (cy - origAnchor[1]) * sy
-                    ];
-                    if (origAnchor.length > 2) newAx.push(origAnchor[2]);
-                    if (origPos.length > 2) newPx.push(origPos[2]);
-                    newLayer.property("ADBE Transform Group").property("ADBE Anchor Point").setValue(newAx);
-                    newLayer.property("ADBE Transform Group").property("ADBE Position").setValue(newPx);
+                    centerAnchorKeepingPlacement(newLayer, cInfo.anchor[0], cInfo.anchor[1]);
                 }}
                 createdCount++;
             }}
@@ -2632,7 +2740,7 @@ def build_push_jsx_code(file_path: str, clusters: list, feather: float = 5.0,
                 var outFile = new File(outPath);
                 outFile.encoding = "UTF-8";
                 outFile.open("w");
-                outFile.write('{{"ok": true, "created": ' + createdCount + ', "compName": "' + comp.name.replace(/"/g, '\\\\"') + '"}}');
+                outFile.write('{{"ok": true, "created": ' + createdCount + ', "anchorSkipped": ' + anchorSkipped + ', "compName": "' + comp.name.replace(/"/g, '\\\\"') + '"}}');
                 outFile.close();
             }}
         }} catch (err) {{
@@ -2684,6 +2792,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
     py_exe = str(sys.executable).replace("\\", "/")
     script_py = str(Path(__file__).resolve()).replace("\\", "/")
     req_json_path = str(Path(tempfile.gettempdir()) / "ae_splitter_req.json").replace("\\", "/")
+    render_png_path = str(Path(tempfile.gettempdir()) / "ae_splitter_src_render.png").replace("\\", "/")
 
     return f"""// ============================================================================
 // AE Text Cluster & Mask Splitter - Native After Effects Plugin Panel
@@ -2693,6 +2802,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
     var PY_EXE = "{py_exe}";
     var SCRIPT_PY = "{script_py}";
     var REQ_FILE = "{req_json_path}";
+    var RENDER_FILE = "{render_png_path}";
     var IS_MAC = ($.os.indexOf("Mac") !== -1);
     var activeCluster = 1;
     var siblingFiles = [];
@@ -2824,6 +2934,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
                 sourceName: (l.source && l.source.name) ? l.source.name : "",
                 layerWidth: l.width || 0,
                 layerHeight: l.height || 0,
+                item: l.source,
                 label: l.name + " (" + compName + ")"
             }};
         }}
@@ -2836,6 +2947,7 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
                 sourceName: item.name || "",
                 layerWidth: item.width || 0,
                 layerHeight: item.height || 0,
+                item: item,
                 label: item.name + " (Project Panel)"
             }};
         }}
@@ -3129,13 +3241,46 @@ def build_native_scriptui_jsx(port: int = 8765) -> str:
             return String(s || "").replace(/\\\\/g, "/").replace(/"/g, '\\\\"');
         }}
 
+        // Render a PSD footage item exactly as AE draws it (Layer Styles, smart objects, AE's own layer bounds), so the
+        // masks are computed in the same pixel frame as the AE layer. psd-tools can't reproduce layer effects and may
+        // not find renamed / nested layers.
+        function renderFootageToPng(fi) {{
+            var out = new File(RENDER_FILE);
+            var tmpComp = null;
+            try {{
+                if (out.exists) out.remove();
+                app.beginUndoGroup("Text Splitter preview render");
+                tmpComp = app.project.items.addComp("__TCS_RENDER__", Math.max(4, fi.width), Math.max(4, fi.height), 1, 1, 25);
+                tmpComp.layers.add(fi);
+                tmpComp.saveFrameToPng(0, out);
+                // saveFrameToPng writes asynchronously
+                var waited = 0;
+                while ((!out.exists || out.length === 0) && waited < 8000) {{ $.sleep(50); waited += 50; }}
+                $.sleep(60);
+            }} catch (eR) {{
+            }} finally {{
+                try {{ if (tmpComp) tmpComp.remove(); }} catch (eRm) {{}}
+                try {{ app.endUndoGroup(); }} catch (eU) {{}}
+            }}
+            return (out.exists && out.length > 0) ? out.fsName : "";
+        }}
+
         function loadFileByPath(fp, info) {{
             var cleanPath = escJson(fp);
             var lName = info ? escJson(info.layerName) : "";
             var sName = info ? escJson(info.sourceName) : "";
             var lw = (info && info.layerWidth) ? info.layerWidth : 0;
             var lh = (info && info.layerHeight) ? info.layerHeight : 0;
-            writeReqJson('{{"file": "' + cleanPath + '", "layerName": "' + lName + '", "sourceName": "' + sName + '", "layerWidth": ' + lw + ', "layerHeight": ' + lh + '}}');
+            var renderPath = "";
+            if (info && info.item && info.item.footageMissing) {{
+                statusTxt.text = "⚠️ Footage '" + info.item.name + "' đang bị mất (offline) trong AE. Hãy Relink file trước khi tách.";
+                return;
+            }}
+            if (info && info.item && /\\.psd$/i.test(String(fp))) {{
+                statusTxt.text = "⏳ Đang render layer PSD từ After Effects...";
+                renderPath = escJson(renderFootageToPng(info.item));
+            }}
+            writeReqJson('{{"file": "' + cleanPath + '", "layerName": "' + lName + '", "sourceName": "' + sName + '", "layerWidth": ' + lw + ', "layerHeight": ' + lh + ', "renderPath": "' + renderPath + '"}}');
             var res = callApi("/api/su_init_from_req", "");
             refreshPreview(res);
         }}
@@ -4333,6 +4478,17 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        try:
+            self._do_get()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
+            except Exception:
+                pass
+
+    def _do_get(self):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
 
@@ -4357,7 +4513,8 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
                     layer_name=ae_info.get("layerName", "") if ae_info.get("ok") else STATE.layer_name,
                     source_name=ae_info.get("sourceName", "") if ae_info.get("ok") else STATE.source_name,
                     layer_w=int(ae_info.get("layerWidth", 0) or 0) if ae_info.get("ok") else STATE.layer_w,
-                    layer_h=int(ae_info.get("layerHeight", 0) or 0) if ae_info.get("ok") else STATE.layer_h
+                    layer_h=int(ae_info.get("layerHeight", 0) or 0) if ae_info.get("ok") else STATE.layer_h,
+                    render_path=resolve_mac_path(ae_info.get("renderPath", "") or "") if ae_info.get("ok") else ""
                 )
                 self._send_json({
                     "ok": True,
@@ -4380,6 +4537,7 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
             s_name = ""
             l_w = 0
             l_h = 0
+            r_path = ""
             if req_file.exists():
                 try:
                     req_data = json.loads(req_file.read_text(encoding="utf-8"))
@@ -4388,10 +4546,11 @@ class SplitterRequestHandler(BaseHTTPRequestHandler):
                     s_name = req_data.get("sourceName", "") or ""
                     l_w = int(req_data.get("layerWidth", 0) or 0)
                     l_h = int(req_data.get("layerHeight", 0) or 0)
+                    r_path = resolve_mac_path(req_data.get("renderPath", "") or "")
                 except Exception:
                     pass
             if fp and os.path.exists(fp):
-                STATE.load_image(fp, layer_name=l_name, source_name=s_name, layer_w=l_w, layer_h=l_h)
+                STATE.load_image(fp, layer_name=l_name, source_name=s_name, layer_w=l_w, layer_h=l_h, render_path=r_path)
             if not STATE.file_path:
                 self._send_json({"ok": False, "error": "Không tìm thấy file PNG/PSD."})
                 return
